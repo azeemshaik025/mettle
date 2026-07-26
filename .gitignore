@@ -1,0 +1,5 @@
+# Local design/planning notes — not part of the published crate
+learning/
+
+# Rust build output
+/target
