@@ -32,6 +32,6 @@ mod test_support;
 
 pub use backoff::{Backoff, BackoffConfigError, ExponentialBackoff, ExponentialBackoffConfig};
 #[cfg(feature = "async")]
-pub use clock::{Clock, TokioClock};
+pub use clock::Clock;
 #[cfg(feature = "async")]
-pub use retry::{Retry, RetryFuture, retry};
+pub use retry::retry;
