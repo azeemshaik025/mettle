@@ -87,6 +87,9 @@ impl Default for ExponentialBackoffConfig {
 /// [`ExponentialBackoffConfig`]; a zero `base` or `factor` would cause a zero-delay busy-loop, so
 /// those configs are rejected up front. A freshly built value is an un-started sequence, and
 /// `retry` consumes it by value, so pass a fresh (or cloned) one to run the same policy again.
+///
+/// Delays are deterministic: no jitter is applied, so a given config always yields the same
+/// sequence. Jitter is planned; until then, wrap this in a custom [`Backoff`] if you need it.
 #[derive(Debug, Clone)]
 pub struct ExponentialBackoff {
     factor: NonZeroU32,

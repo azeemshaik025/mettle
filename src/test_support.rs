@@ -42,6 +42,10 @@ pub(crate) fn count_retry_events() -> RetryEventCount {
     INIT.call_once(|| {
         let _ = tracing::subscriber::set_global_default(Counter);
     });
+    // Flush any callsite interest cached before this subscriber was installed. Another retry test
+    // may have hit the `mettle::retry` callsite first with no subscriber, caching it as "never
+    // interested", which would silently drop our events. Rebuilding forces a re-query.
+    tracing::callsite::rebuild_interest_cache();
     RETRY_EVENTS.with(|c| c.set(0));
     RetryEventCount
 }

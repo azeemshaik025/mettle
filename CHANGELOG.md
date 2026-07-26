@@ -5,12 +5,29 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.1] - 2026-07-26
+## [0.2.0] - 2026-07-26
+
+Supersedes the yanked 0.1.1: that release removed public items in a patch, which was a breaking
+change. This makes it a proper minor bump.
 
 ### Changed
-- Trimmed the crate-root re-exports to the symbols developers actually name. `TokioClock`,
-  `Retry`, and `RetryFuture` are no longer exported at the crate root; reach them via
-  `mettle::clock::TokioClock`, `mettle::retry::Retry`, and `mettle::retry::RetryFuture`.
+- **Breaking:** the crate-root re-exports were trimmed. Reach `TokioClock`, `Retry`, and
+  `RetryFuture` via `mettle::clock::TokioClock`, `mettle::retry::Retry`, and
+  `mettle::retry::RetryFuture` instead of the crate root.
+- Dual-licensed under `MIT OR Apache-2.0` (previously `MIT`).
+
+### Added
+- `#![forbid(unsafe_code)]`.
+- Expanded crate docs: a landing-page quickstart, plus cancellation, `Send`/`'static`,
+  determinism, and observability notes. Feature-gated items are now labeled on docs.rs.
+
+## [0.1.1] - 2026-07-26 — Yanked
+
+Yanked: it removed public re-exports in a patch release, which is a breaking change. Use 0.2.0.
+
+### Changed
+- Trimmed the crate-root re-exports (`TokioClock`, `Retry`, `RetryFuture` moved to
+  `mettle::clock` / `mettle::retry`).
 
 ## [0.1.0] - 2026-07-26
 

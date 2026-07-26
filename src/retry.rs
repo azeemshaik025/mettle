@@ -1,6 +1,17 @@
 //! Retry a fallible async operation, backing off between attempts.
 //!
 //! Wrap your operation with [`retry()`] and await it; override the defaults only if you need to.
+//!
+//! # Cancellation
+//!
+//! The future is cancellation-safe: drop it (for example when a `tokio::time::timeout` fires) and
+//! the in-flight attempt is dropped with it. Nothing keeps running in the background.
+//!
+//! # `Send` and `'static`
+//!
+//! The future borrows only what your operation borrows, and is `Send` only when its parts are, so
+//! the operation may capture non-`'static` locals and need not be `Send` (it runs on a
+//! current-thread runtime).
 
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;

@@ -1,16 +1,20 @@
 [package]
 name = "mettle"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A resilience toolkit for Rust."
+description = "A resilience toolkit for Rust: async and blocking retries with configurable backoff."
 readme = "README.md"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 keywords = ["retry", "backoff", "resilience", "async", "tokio"]
 categories = ["asynchronous", "network-programming"]
 repository = "https://github.com/azeemshaik025/mettle"
 documentation = "https://docs.rs/mettle"
 exclude = ["docs", "learning"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 tokio = { version = "1", features = ["time"], optional = true }
