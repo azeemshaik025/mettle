@@ -81,7 +81,7 @@ impl std::error::Error for BackoffConfigError {}
 /// ```
 #[derive(Debug, Clone)]
 pub struct ExponentialBackoffConfig {
-    /// Growth multiplier applied each retry (must be >= 1).
+    /// Growth multiplier applied each retry (must be >= 1). Set it to `1` for a constant delay.
     pub factor: u32,
     /// Delay before the first retry (must be non-zero).
     pub base: Duration,
@@ -425,6 +425,13 @@ mod tests {
         assert_eq!(b.next_delay(), Some(secs(8)));
         assert_eq!(b.next_delay(), Some(secs(16)));
         assert_eq!(b.next_delay(), None); // 5 retries used up
+    }
+
+    #[test]
+    fn factor_of_one_holds_the_delay_constant() {
+        // Documented on `ExponentialBackoffConfig::factor`, and the reason there's no separate
+        // `ConstantBackoff` type.
+        assert_eq!(drain(exp(7, 1, 100, 4)), vec![secs(7); 4]);
     }
 
     #[test]
