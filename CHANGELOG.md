@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-09
+
+### Changed
+- **Breaking:** `retry(..).await` and `blocking::retry(..).call()` now fail with `RetryError<E>`
+  instead of `E`. It carries the last error plus `attempts()`, `elapsed()`, and a `stop_reason()`
+  of `RetriesExhausted` / `NotRetryable` / `MaxElapsed`, so a failed retry says which limit it hit
+  rather than leaving you to guess. To keep the old signature, add
+  `.map_err(RetryError::into_error)`.
+
+  `?` into `Box<dyn Error>` and `anyhow::Error` keeps working and now covers error types it didn't
+  before (`String`, `Box<dyn Error>`, `anyhow::Error`), because `RetryError` implements
+  `std::error::Error` for `E: Debug + Display` rather than `E: Error`. The trade is that it has no
+  `source()`; the inner error's text rides along in `Display`. ADR005 has the reasoning.
+- **Breaking:** giving up now emits one more `tracing` event on target `mettle::retry`, with
+  `attempts`, `elapsed_ms`, and `reason`, but only when at least one retry actually happened.
+  Anyone counting events on that target sees a change.
+- The async driver starts its clock on the first poll rather than at `.into_future()`, matching the
+  blocking driver. A future parked before its first poll no longer bills that time to the operation.
+
 ## [0.3.0] - 2026-08-09
 
 Adds jitter. Purely additive apart from one collision noted under Upgrading.

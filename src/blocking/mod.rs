@@ -8,7 +8,7 @@
 //! # fn fetch() -> Result<u32, std::io::Error> { Ok(1) }
 //! let value = mettle::blocking::retry(fetch).call()?;
 //! # let _ = value;
-//! # Ok::<(), std::io::Error>(())
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 mod clock;

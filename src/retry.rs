@@ -22,7 +22,8 @@ use pin_project_lite::pin_project;
 
 use crate::backoff::{Backoff, ExponentialBackoff};
 use crate::clock::{Clock, TokioClock};
-use crate::shared::{should_retry_after, trace_retry};
+use crate::error::RetryError;
+use crate::shared::{Decision, give_up, should_retry_after, trace_retry};
 
 /// A configurable retry operation.
 ///
@@ -46,10 +47,23 @@ pub struct Retry<F, B, C, P> {
 ///
 /// ```no_run
 /// # use mettle::retry;
-/// # async fn demo() -> Result<(), std::io::Error> {
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 /// let value = retry(|| async { Ok::<_, std::io::Error>(1) }).await?;
 /// # let _ = value;
 /// # Ok(())
+/// # }
+/// ```
+///
+/// On failure the error is a [`RetryError`], carrying the last error plus the attempt count,
+/// elapsed time, and why it stopped. It `?`s into `Box<dyn Error>` and `anyhow::Error`. To get
+/// the bare error back and keep a `Result<T, E>` signature:
+///
+/// ```no_run
+/// # use mettle::{retry, RetryError};
+/// # async fn demo() -> Result<u32, std::io::Error> {
+/// retry(|| async { Ok::<_, std::io::Error>(1) })
+///     .await
+///     .map_err(RetryError::into_error)
 /// # }
 /// ```
 pub fn retry<F, Fut, T, E>(op: F) -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool>
@@ -127,15 +141,18 @@ where
     B: Backoff,
     Fut: Future<Output = Result<T, E>>,
 {
-    type Output = Result<T, E>;
+    type Output = Result<T, RetryError<E>>;
     type IntoFuture = RetryFuture<F, Fut, B, C, P, C::Sleep>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let start = self.clock.now();
         RetryFuture {
-            start,
+            // Sampled on the first poll, not here: a future can sit unpolled (parked in a
+            // `FuturesUnordered`, say), and that wait isn't time the operation spent. It also
+            // keeps the async and blocking drivers measuring from the same point, which matters
+            // now that `elapsed` is something callers can read.
+            start: None,
             state: RetryState::Idle,
-            attempt: 0,
+            retries: 0,
             op: self.op,
             when: self.when,
             clock: self.clock,
@@ -155,8 +172,8 @@ pin_project! {
         when: P,
         clock: C,
         backoff: B,
-        start: Instant,
-        attempt: u32,
+        start: Option<Instant>,
+        retries: u32,
 
         #[pin]
         state: RetryState<Fut, S>,
@@ -186,37 +203,54 @@ where
     S: Future<Output = ()>,
     Fut: Future<Output = Result<T, E>>,
 {
-    type Output = Result<T, E>;
+    type Output = Result<T, RetryError<E>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
 
         loop {
             let next = match this.state.as_mut().project() {
-                // Nothing in flight — start an attempt.
-                RetryStateProj::Idle => RetryState::Attempting { fut: (this.op)() },
+                // Nothing in flight — start an attempt. Reached exactly once, so this is where
+                // the clock starts.
+                RetryStateProj::Idle => {
+                    *this.start = Some(this.clock.now());
+                    RetryState::Attempting { fut: (this.op)() }
+                }
 
                 // An attempt is in flight — drive it.
                 RetryStateProj::Attempting { fut } => match fut.poll(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Ok(value)) => return Poll::Ready(Ok(value)),
                     Poll::Ready(Err(err)) => {
+                        let elapsed = || {
+                            this.start.map_or(Duration::ZERO, |s| {
+                                this.clock.now().saturating_duration_since(s)
+                            })
+                        };
                         let step = should_retry_after(
                             &err,
                             &*this.when,
                             &mut *this.backoff,
                             *this.max_elapsed,
-                            || this.clock.now().saturating_duration_since(*this.start),
+                            elapsed,
                         );
                         match step {
-                            Some(delay) => {
-                                *this.attempt += 1;
-                                trace_retry(*this.attempt, &err, delay);
+                            Decision::Retry(delay) => {
+                                *this.retries += 1;
+                                trace_retry(*this.retries, &err, delay);
                                 RetryState::Sleeping {
                                     delay: this.clock.sleep(delay),
                                 }
                             }
-                            None => return Poll::Ready(Err(err)),
+                            Decision::Stop { reason, elapsed: m } => {
+                                return Poll::Ready(Err(give_up(
+                                    err,
+                                    *this.retries,
+                                    reason,
+                                    m,
+                                    elapsed,
+                                )));
+                            }
                         }
                     }
                 },
@@ -236,6 +270,7 @@ where
 mod tests {
     use super::*;
     use crate::backoff::{ExponentialBackoff, ExponentialBackoffConfig};
+    use crate::error::StopReason;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
@@ -295,8 +330,9 @@ mod tests {
     #[tokio::test]
     async fn succeeds_first_try() {
         let clock = MockClock::new();
-        let result: Result<i32, ()> = retry(|| async { Ok(42) }).clock(clock.clone()).await;
-        assert_eq!(result, Ok(42));
+        let result: Result<i32, RetryError<()>> =
+            retry(|| async { Ok(42) }).clock(clock.clone()).await;
+        assert_eq!(result.unwrap(), 42);
         assert!(clock.slept().is_empty()); // no retries → no sleeps
     }
 
@@ -305,7 +341,7 @@ mod tests {
         let clock = MockClock::new();
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
-        let result: Result<i32, &str> = retry(move || {
+        let result: Result<i32, RetryError<&str>> = retry(move || {
             let a = a.clone();
             async move {
                 let n = a.fetch_add(1, SeqCst);
@@ -316,7 +352,7 @@ mod tests {
         .clock(clock.clone())
         .await;
 
-        assert_eq!(result, Ok(42));
+        assert_eq!(result.unwrap(), 42);
         assert_eq!(attempts.load(SeqCst), 3); // 2 failures + 1 success
         assert_eq!(clock.slept(), vec![secs(1), secs(2)]); // slept after each failure
     }
@@ -326,7 +362,7 @@ mod tests {
         let clock = MockClock::new();
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
-        let result: Result<i32, &str> = retry(move || {
+        let result: Result<i32, RetryError<&str>> = retry(move || {
             let a = a.clone();
             async move {
                 a.fetch_add(1, SeqCst);
@@ -338,7 +374,11 @@ mod tests {
         .when(|_e| false) // nothing is retryable
         .await;
 
-        assert_eq!(result, Err("nope"));
+        let err = result.unwrap_err();
+        assert_eq!(*err.error(), "nope");
+        assert_eq!(err.stop_reason(), StopReason::NotRetryable);
+        assert_eq!(err.attempts(), 1); // the rejected attempt still ran
+        assert_eq!(err.elapsed(), Duration::ZERO);
         assert_eq!(attempts.load(SeqCst), 1); // exactly one attempt
         assert!(clock.slept().is_empty());
     }
@@ -346,25 +386,35 @@ mod tests {
     #[tokio::test]
     async fn exhausts_retries() {
         let clock = MockClock::new();
-        let result: Result<i32, &str> = retry(|| async { Err("always") })
+        let result: Result<i32, RetryError<&str>> = retry(|| async { Err("always") })
             .backoff(backoff(3))
             .clock(clock.clone())
             .await;
 
-        assert_eq!(result, Err("always"));
+        let err = result.unwrap_err();
+        assert_eq!(*err.error(), "always");
+        assert_eq!(err.stop_reason(), StopReason::RetriesExhausted);
+        assert_eq!(err.attempts(), 4); // 3 retries -> 4 attempts
+        assert_eq!(err.elapsed(), secs(7)); // 1 + 2 + 4 on the mock clock
         assert_eq!(clock.slept().len(), 3); // 3 retries → 3 sleeps, then give up
     }
 
     #[tokio::test]
     async fn stops_on_time_budget() {
         let clock = MockClock::new();
-        let result: Result<i32, &str> = retry(|| async { Err("slow") })
+        let result: Result<i32, RetryError<&str>> = retry(|| async { Err("slow") })
             .backoff(backoff(100)) // effectively unlimited retries
             .clock(clock.clone())
             .max_elapsed(secs(10))
             .await;
 
-        assert_eq!(result, Err("slow"));
+        let err = result.unwrap_err();
+        assert_eq!(*err.error(), "slow");
+        assert_eq!(err.stop_reason(), StopReason::MaxElapsed);
+        assert!(
+            err.elapsed() < secs(10),
+            "elapsed must stay under the budget"
+        );
         // 1 (→1s), 2 (→3s), 4 (→7s); next would be 8 → 7+8=15 ≥ 10 → stop.
         assert_eq!(clock.slept(), vec![secs(1), secs(2), secs(4)]);
     }
@@ -379,7 +429,7 @@ mod tests {
         let greeting = String::from("hi");
         let attempts = AtomicUsize::new(0);
 
-        let out: Result<String, &str> = retry(|| async {
+        let out: Result<String, RetryError<&str>> = retry(|| async {
             let n = attempts.fetch_add(1, SeqCst);
             if n < 2 {
                 Err("transient")
@@ -391,7 +441,7 @@ mod tests {
         .clock(clock.clone())
         .await;
 
-        assert_eq!(out, Ok("hi!".to_string()));
+        assert_eq!(out.unwrap(), "hi!");
         assert_eq!(attempts.load(SeqCst), 3);
         let _ = greeting; // still owned here — it was borrowed, not moved
     }
@@ -406,7 +456,7 @@ mod tests {
         let clock = MockClock::new();
         let shared = Rc::new(Cell::new(0));
 
-        let out: Result<i32, &str> = retry({
+        let out: Result<i32, RetryError<&str>> = retry({
             let shared = shared.clone();
             move || {
                 let shared = shared.clone();
@@ -424,7 +474,7 @@ mod tests {
         .clock(clock.clone())
         .await;
 
-        assert_eq!(out, Ok(2));
+        assert_eq!(out.unwrap(), 2);
     }
 
     // --- realistic usage patterns ---
@@ -440,7 +490,7 @@ mod tests {
         let clock = MockClock::new();
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
-        let out: Result<i32, ApiError> = retry(move || {
+        let out: Result<i32, RetryError<ApiError>> = retry(move || {
             let a = a.clone();
             async move {
                 match a.fetch_add(1, SeqCst) {
@@ -454,7 +504,7 @@ mod tests {
         .when(|e| matches!(e, ApiError::Transient))
         .await;
 
-        assert_eq!(out, Err(ApiError::Fatal));
+        assert_eq!(*out.unwrap_err().error(), ApiError::Fatal);
         assert_eq!(attempts.load(SeqCst), 3); // transient, transient, fatal → stop
         assert_eq!(clock.slept(), vec![secs(1), secs(2)]); // slept only after the transients
     }
@@ -464,7 +514,7 @@ mod tests {
         // The op is `FnMut`, so it can mutate captured state directly — no Arc/atomic needed.
         let clock = MockClock::new();
         let mut calls = 0;
-        let out: Result<i32, &str> = retry(|| {
+        let out: Result<i32, RetryError<&str>> = retry(|| {
             calls += 1;
             let n = calls;
             async move { if n < 3 { Err("transient") } else { Ok(n) } }
@@ -473,29 +523,59 @@ mod tests {
         .clock(clock.clone())
         .await;
 
-        assert_eq!(out, Ok(3));
+        assert_eq!(out.unwrap(), 3);
         assert_eq!(calls, 3); // mutated across attempts through a &mut capture
     }
 
     #[tokio::test]
-    async fn reads_clock_only_when_a_budget_is_set() {
-        // Perf contract: with no `max_elapsed` we never read the clock in the retry loop —
-        // only the single `start` read at construction.
-        let clock = MockClock::new();
-        let _: Result<i32, &str> = retry(|| async { Err("x") })
-            .backoff(backoff(3))
-            .clock(clock.clone())
-            .await;
-        assert_eq!(clock.now_calls(), 1); // just `start`
+    async fn clock_reads_do_not_scale_with_attempts() {
+        // Perf contract: with no `max_elapsed` the retry loop never touches the clock. Two reads
+        // total, whatever the retry count — `start` on the first poll, and one at the end to
+        // measure `elapsed`. Asserting both 3 and 30 retries pins the *slope*, which is the part
+        // that matters; a single count would still pass if the loop started reading per attempt.
+        for retries in [3, 30] {
+            let clock = MockClock::new();
+            let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
+                .backoff(backoff(retries))
+                .clock(clock.clone())
+                .await;
+            assert_eq!(clock.now_calls(), 2, "with {retries} retries and no budget");
+        }
 
-        // With a budget, one extra read per retry decision (3 retries here).
+        // With a budget, one extra read per retry decision, plus start and the terminal read.
         let clock = MockClock::new();
-        let _: Result<i32, &str> = retry(|| async { Err("x") })
+        let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
             .backoff(backoff(3))
             .clock(clock.clone())
             .max_elapsed(secs(1000))
             .await;
-        assert_eq!(clock.now_calls(), 4); // start + 3
+        assert_eq!(clock.now_calls(), 5); // start + 3 decisions + terminal
+
+        // Stopping *on* the budget reuses the read the budget check just did, so that path costs
+        // no more than it did before `elapsed` existed.
+        let clock = MockClock::new();
+        let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
+            .backoff(backoff(100))
+            .clock(clock.clone())
+            .max_elapsed(secs(10))
+            .await;
+        assert_eq!(clock.now_calls(), 5); // start + 4 decisions, no extra terminal read
+    }
+
+    #[tokio::test]
+    async fn elapsed_excludes_time_parked_before_the_first_poll() {
+        // `start` is sampled on the first poll, not at `.into_future()`. A future can sit unpolled
+        // in a `FuturesUnordered`, and that wait isn't time the operation spent.
+        let clock = MockClock::new();
+        let fut = retry(|| async { Err::<i32, _>("x") })
+            .backoff(backoff(1))
+            .clock(clock.clone())
+            .into_future();
+
+        clock.sleep(secs(100)).await; // parked; nobody has polled `fut` yet
+
+        let err = fut.await.unwrap_err();
+        assert_eq!(err.elapsed(), secs(1)); // only the one backoff delay, not the 100s park
     }
 
     // --- suspension, wakers, and the real Tokio timer (the mock never goes Pending) ---
@@ -507,7 +587,7 @@ mod tests {
         let clock = MockClock::new();
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
-        let out: Result<i32, &str> = retry(move || {
+        let out: Result<i32, RetryError<&str>> = retry(move || {
             let a = a.clone();
             async move {
                 tokio::task::yield_now().await; // suspend mid-attempt
@@ -522,7 +602,7 @@ mod tests {
         .clock(clock.clone())
         .await;
 
-        assert_eq!(out, Ok(7));
+        assert_eq!(out.unwrap(), 7);
         assert_eq!(attempts.load(SeqCst), 2);
     }
 
@@ -534,7 +614,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
         let start = tokio::time::Instant::now();
-        let out: Result<i32, &str> = retry(move || {
+        let out: Result<i32, RetryError<&str>> = retry(move || {
             let a = a.clone();
             async move {
                 if a.fetch_add(1, SeqCst) < 2 {
@@ -547,7 +627,7 @@ mod tests {
         .backoff(backoff(5)) // delays: 1s, 2s
         .await;
 
-        assert_eq!(out, Ok(9));
+        assert_eq!(out.unwrap(), 9);
         assert_eq!(attempts.load(SeqCst), 3);
         assert_eq!(start.elapsed(), secs(3)); // really waited 1s + 2s of (virtual) time
     }
@@ -558,7 +638,7 @@ mod tests {
         // passes because `now` and `sleep` share a time source — otherwise it would never stop.
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
-        let out: Result<i32, &str> = retry(move || {
+        let out: Result<i32, RetryError<&str>> = retry(move || {
             let a = a.clone();
             async move {
                 a.fetch_add(1, SeqCst);
@@ -569,7 +649,7 @@ mod tests {
         .max_elapsed(secs(10))
         .await;
 
-        assert_eq!(out, Err("slow"));
+        assert_eq!(*out.unwrap_err().error(), "slow");
         assert_eq!(attempts.load(SeqCst), 4); // 1(→1s) 2(→3s) 4(→7s); next 8 → 15 ≥ 10, stop
     }
 
@@ -615,12 +695,12 @@ mod tests {
             max_delay: Duration::from_nanos(1),
         })
         .unwrap();
-        let out: Result<i32, &str> = retry(|| async { Err("always") })
+        let out: Result<i32, RetryError<&str>> = retry(|| async { Err("always") })
             .backoff(big)
             .clock(clock.clone())
             .await;
 
-        assert_eq!(out, Err("always"));
+        assert_eq!(*out.unwrap_err().error(), "always");
         assert_eq!(clock.slept().len(), 5000); // 5000 retries, then give up
     }
 
@@ -668,7 +748,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let a = attempts.clone();
 
-        let out: Result<i32, &str> = retry(move || {
+        let out: Result<i32, RetryError<&str>> = retry(move || {
             let a = a.clone();
             async move {
                 if a.fetch_add(1, SeqCst) < 2 {
@@ -682,8 +762,34 @@ mod tests {
         .clock(clock)
         .await;
 
-        assert_eq!(out, Ok(42));
+        assert_eq!(out.unwrap(), 42);
         assert_eq!(events.get(), 2); // one event per retry
+    }
+
+    #[tokio::test]
+    async fn give_up_event_fires_once_and_only_after_a_retry() {
+        // Exhausting retries: one event per retry, plus one for giving up.
+        let events = crate::test_support::count_retry_events();
+        let clock = MockClock::new();
+        let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
+            .backoff(backoff(3))
+            .clock(clock)
+            .await;
+        assert_eq!(events.get(), 4); // 3 retries + 1 give-up
+    }
+
+    #[tokio::test]
+    async fn non_retryable_first_error_is_silent() {
+        // A `.when` filter in front of an HTTP client would otherwise WARN on every 404, on a
+        // path that emitted nothing before the give-up event existed.
+        let events = crate::test_support::count_retry_events();
+        let clock = MockClock::new();
+        let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
+            .backoff(backoff(3))
+            .clock(clock)
+            .when(|_| false)
+            .await;
+        assert_eq!(events.get(), 0);
     }
 
     // --- randomized strategies driven through the real driver ---
@@ -696,7 +802,7 @@ mod tests {
         use crate::backoff::{DecorrelatedBackoff, DecorrelatedBackoffConfig};
 
         let clock = MockClock::new();
-        let out: Result<i32, &str> = retry(|| async { Err("boom") })
+        let out: Result<i32, RetryError<&str>> = retry(|| async { Err("boom") })
             .backoff(
                 DecorrelatedBackoff::with_seed(
                     DecorrelatedBackoffConfig {
@@ -711,7 +817,7 @@ mod tests {
             .clock(clock.clone())
             .await;
 
-        assert_eq!(out, Err("boom"));
+        assert_eq!(*out.unwrap_err().error(), "boom");
         let slept = clock.slept();
         assert_eq!(slept.len(), 4); // max_retries sleeps, then give up
         assert!(
@@ -742,12 +848,12 @@ mod tests {
     #[tokio::test]
     async fn drives_a_jittered_backoff() {
         let clock = MockClock::new();
-        let out: Result<i32, &str> = retry(|| async { Err("boom") })
+        let out: Result<i32, RetryError<&str>> = retry(|| async { Err("boom") })
             .backoff(crate::backoff::Jittered::with_seed(backoff(3), 42))
             .clock(clock.clone())
             .await;
 
-        assert_eq!(out, Err("boom"));
+        assert_eq!(*out.unwrap_err().error(), "boom");
         // Underlying exponential is 1s, 2s, 4s; full jitter can only shrink each one.
         let slept = clock.slept();
         assert_eq!(slept.len(), 3);

@@ -50,11 +50,23 @@
 //! [`jittered_with_seed`](Backoff::jittered_with_seed) or
 //! [`DecorrelatedBackoff::with_seed`] when a test needs the delays to repeat.
 //!
+//! # When it fails
+//!
+//! Both APIs fail with a [`RetryError<E>`](RetryError): the last error, plus how many attempts ran,
+//! how long they took, and a [`StopReason`] saying which limit stopped it. During an incident that
+//! difference is usually the whole question, since the last error alone can't tell you whether you
+//! burned three retries in 700 ms or a 30 s budget.
+//!
+//! It `?`s straight into `Box<dyn Error>` and `anyhow::Error`. To go back to the bare error, use
+//! `.map_err(RetryError::into_error)`.
+//!
 //! # Observability
 //!
 //! Every retry emits a [`tracing`](https://docs.rs/tracing) event on target `mettle::retry` at
-//! `WARN`, carrying the `attempt` number, `delay_ms`, and the `error`. Install any subscriber to
-//! see them, filter with `RUST_LOG=mettle::retry=warn`, or silence with `RUST_LOG=mettle=off`.
+//! `WARN`, carrying the `attempt` number, `delay_ms`, and the `error`. If at least one retry
+//! happened, giving up emits one more on the same target with `attempts`, `elapsed_ms`, and
+//! `reason`. Install any subscriber to see them, filter with `RUST_LOG=mettle::retry=warn`, or
+//! silence with `RUST_LOG=mettle=off`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -64,6 +76,7 @@
 compile_error!("enable at least one of the `async` or `blocking` features");
 
 pub mod backoff;
+pub mod error;
 
 #[cfg(feature = "blocking")]
 #[cfg_attr(docsrs, doc(cfg(feature = "blocking")))]
@@ -87,5 +100,6 @@ pub use backoff::{
 };
 #[cfg(feature = "async")]
 pub use clock::Clock;
+pub use error::{RetryError, StopReason};
 #[cfg(feature = "async")]
 pub use retry::retry;
