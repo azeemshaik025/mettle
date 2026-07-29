@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Jitter for backoff: the `Jitter` mode (`Full` / `Equal`) and a `Backoff::jittered(..)` combinator
+  that wraps any strategy, so a fleet of clients doesn't retry in lockstep. Opt-in; the RNG is
+  seedable for reproducible tests.
+- `DecorrelatedBackoff`, built from a validated `DecorrelatedBackoffConfig`: each delay is drawn
+  from `base ..= prev * 3`, capped at `max_delay` (the AWS "Exponential Backoff and Jitter"
+  formula). It's a strategy rather than a `Jitter` mode because the randomness lives in the
+  recurrence, so there's no deterministic sequence for `Jittered` to wrap. Seedable via
+  `DecorrelatedBackoff::with_seed`.
+
+The randomized strategies (`DecorrelatedBackoff`, `Jittered`) are deliberately not `Clone`. A copy
+would carry the RNG state and replay the same delays, which is the lockstep jitter exists to
+prevent; clone the config and build a fresh strategy instead.
+
+Jitter needs a random number generator, so this adds `fastrand` as a required dependency (1198
+lines, no transitive dependencies of its own). It is not behind a feature flag; ADR004 records the
+measurements and the reasoning.
+
 ## [0.2.0] - 2026-07-26
 
 Supersedes the yanked 0.1.1: that release removed public items in a patch, which was a breaking

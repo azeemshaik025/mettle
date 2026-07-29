@@ -20,6 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 tokio = { version = "1", features = ["time"], optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+fastrand = "2"
 
 [features]
 default = ["async", "blocking"]

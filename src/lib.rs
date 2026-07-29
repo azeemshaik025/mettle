@@ -58,7 +58,10 @@ mod shared;
 #[cfg(test)]
 mod test_support;
 
-pub use backoff::{Backoff, BackoffConfigError, ExponentialBackoff, ExponentialBackoffConfig};
+pub use backoff::{
+    Backoff, BackoffConfigError, DecorrelatedBackoff, DecorrelatedBackoffConfig,
+    ExponentialBackoff, ExponentialBackoffConfig, Jitter, Jittered,
+};
 #[cfg(feature = "async")]
 pub use clock::Clock;
 #[cfg(feature = "async")]
