@@ -54,6 +54,30 @@ pub trait Backoff {
     {
         Jittered::new(self)
     }
+
+    /// As [`jittered`](Backoff::jittered), but with a fixed `seed`, so the delays repeat exactly.
+    ///
+    /// For tests. Turning on jitter otherwise costs you the ability to assert what your retry
+    /// waited, which is the one thing this crate is built to let you do:
+    ///
+    /// ```
+    /// use mettle::{Backoff, ExponentialBackoff};
+    ///
+    /// let delays = |seed| {
+    ///     let mut b = ExponentialBackoff::default().jittered_with_seed(seed);
+    ///     std::iter::from_fn(move || b.next_delay()).collect::<Vec<_>>()
+    /// };
+    /// assert_eq!(delays(42), delays(42));
+    /// ```
+    ///
+    /// Don't reach for this in production. A fleet that all seeds the same way retries in
+    /// lockstep, which is the thundering herd jitter exists to prevent.
+    fn jittered_with_seed(self, seed: u64) -> Jittered<Self>
+    where
+        Self: Sized,
+    {
+        Jittered::with_seed(self, seed)
+    }
 }
 
 /// Why a backoff configuration was rejected. Not every strategy can produce every variant.
@@ -541,6 +565,25 @@ mod tests {
             );
         }
         assert_eq!(b.next_delay(), None);
+    }
+
+    #[test]
+    fn jittered_with_seed_matches_the_named_constructor() {
+        // The combinator is the ergonomic path; it must not be a second-class one. Seeding
+        // through it has to give exactly what naming the type gives.
+        assert_eq!(
+            drain(exp6().jittered_with_seed(42)),
+            drain(Jittered::with_seed(exp6(), 42))
+        );
+        // And it must actually honour the seed rather than quietly reading entropy.
+        assert_eq!(
+            drain(exp6().jittered_with_seed(7)),
+            drain(exp6().jittered_with_seed(7))
+        );
+        assert_ne!(
+            drain(exp6().jittered_with_seed(1)),
+            drain(exp6().jittered_with_seed(2))
+        );
     }
 
     #[test]

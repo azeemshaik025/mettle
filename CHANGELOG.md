@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formula). It's a strategy rather than a `Jitter` mode because the randomness lives in the
   recurrence, so there's no deterministic sequence for `Jittered` to wrap. Seedable via
   `DecorrelatedBackoff::with_seed`.
+- `Backoff::jittered_with_seed(seed)`, so the ergonomic combinator can be seeded too. Previously
+  the readable form couldn't be made deterministic and the deterministic form meant naming
+  `Jittered` directly, which made a test and its production config look nothing alike.
+- `Clock` is now implemented for `&C` and `Arc<C>` (both the async and blocking traits). Writing a
+  mock clock and passing `.clock(&mock)` used to be a compile error, forcing every mock to wrap its
+  own state in `Rc`/`Arc` just to be usable. That was friction on the exact path this crate exists
+  to make easy.
 - Documented that `ExponentialBackoffConfig { factor: 1, .. }` gives a constant delay, so there is
   no separate `ConstantBackoff` type to learn.
 
