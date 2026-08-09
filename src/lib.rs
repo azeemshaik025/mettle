@@ -3,8 +3,9 @@
 //! A resilience toolkit for Rust: composable, testable primitives for handling failure, so you
 //! don't hand-roll retry-and-backoff logic in every project.
 //!
-//! Available now: `retry()` (async) and `blocking::retry()` (sync), both with configurable
-//! backoff and optional jitter. Timeout and circuit breaking are planned.
+//! Two tools: `retry()` (async) and `blocking::retry()` (sync) with configurable backoff and
+//! optional jitter, and a `CircuitBreaker` that sheds load once a dependency is already failing.
+//! They are meant to be used together, since retry on its own amplifies an outage.
 //!
 //! # Quickstart
 //!
@@ -60,13 +61,38 @@
 //! It `?`s straight into `Box<dyn Error>` and `anyhow::Error`. To go back to the bare error, use
 //! `.map_err(RetryError::into_error)`.
 //!
+//! # Circuit breaking
+//!
+//! A [`CircuitBreaker`] is shared across callers, so one caller's failures protect the rest. Put
+//! it *inside* the retry, and tell the retry that a shed call is not worth retrying:
+//!
+//! ```no_run
+//! # #[cfg(feature = "async")]
+//! # async fn demo(breaker: &mettle::CircuitBreaker<mettle::clock::TokioClock>)
+//! # -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn fetch() -> Result<u32, std::io::Error> { Ok(1) }
+//! use mettle::{retry, BreakerError};
+//!
+//! let value = retry(|| breaker.call_async(fetch))
+//!     .when(BreakerError::is_inner)
+//!     .await?;
+//! # let _ = value;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The other order (breaker outside the retry) looks equivalent and isn't: the breaker would see
+//! one outcome per retry schedule instead of one per attempt, which hides the amplification it
+//! exists to stop.
+//!
 //! # Observability
 //!
 //! Every retry emits a [`tracing`](https://docs.rs/tracing) event on target `mettle::retry` at
 //! `WARN`, carrying the `attempt` number, `delay_ms`, and the `error`. If at least one retry
 //! happened, giving up emits one more on the same target with `attempts`, `elapsed_ms`, and
-//! `reason`. Install any subscriber to see them, filter with `RUST_LOG=mettle::retry=warn`, or
-//! silence with `RUST_LOG=mettle=off`.
+//! `reason`. The breaker emits one on `mettle::breaker` per state change, never per call, with
+//! `from`, `to`, `failures`, and `samples`. Install any subscriber to see them, filter with
+//! `RUST_LOG=mettle::retry=warn`, or silence with `RUST_LOG=mettle=off`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -76,7 +102,9 @@
 compile_error!("enable at least one of the `async` or `blocking` features");
 
 pub mod backoff;
+pub mod breaker;
 pub mod error;
+pub mod time;
 
 #[cfg(feature = "blocking")]
 #[cfg_attr(docsrs, doc(cfg(feature = "blocking")))]
@@ -98,8 +126,13 @@ pub use backoff::{
     Backoff, BackoffConfigError, DecorrelatedBackoff, DecorrelatedBackoffConfig,
     ExponentialBackoff, ExponentialBackoffConfig, Jittered,
 };
+pub use breaker::{
+    BreakerConfigError, BreakerError, BreakerState, CircuitBreaker, CircuitBreakerConfig,
+    MAX_WINDOW_SIZE, Permit, Rejected,
+};
 #[cfg(feature = "async")]
 pub use clock::Clock;
 pub use error::{RetryError, StopReason};
 #[cfg(feature = "async")]
 pub use retry::retry;
+pub use time::Now;

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `CircuitBreaker`: the second tool. Sheds calls once enough recent ones have failed, waits, then
+  lets a bounded number of probes through to see whether the dependency recovered. Shared across
+  callers through `&self`, built from a validated `CircuitBreakerConfig`, and reading time through
+  the new `Now` trait so state transitions are testable on a mock clock with no sleeping.
+- `Now`, a read-only time source, with impls for `TokioClock`, `StdClock`, `&C` and `Arc<C>`.
+  Separate from the `Clock` traits because those pair `now` with a `sleep` and are each
+  feature-gated, while a breaker never sleeps and must work under either.
+- `examples/breaker.rs`, which takes a breaker through trip, shed and recovery against an injected
+  clock, so it finishes instantly instead of sleeping.
+
+Put the breaker *inside* the retry, and tell the retry that a shed call is not worth retrying:
+`retry(|| breaker.call_async(op)).when(BreakerError::is_inner)`. The other order hides the
+amplification the breaker exists to stop.
+[ADR007](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR007.md) has the reasoning,
+including why a dropped `Permit` counts as a failure.
+
 ## [0.4.0] - 2026-08-09
 
 Retry now reports why it gave up, not just what failed last. Breaking.

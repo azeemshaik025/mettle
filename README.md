@@ -74,11 +74,31 @@ match retry(|| async { fetch(&url).await }).await {
 
 Only want the underlying error? `.map_err(RetryError::into_error)`.
 
+Retry alone amplifies an outage, so there is a circuit breaker too. Put it inside the retry:
+
+```rust
+use mettle::clock::TokioClock;
+use mettle::{retry, BreakerError, CircuitBreaker, CircuitBreakerConfig};
+use std::sync::Arc;
+
+// One per dependency, shared by everyone who calls it.
+let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default(), TokioClock)?);
+
+let body = retry(|| breaker.call_async(|| fetch(&url)))
+    .when(BreakerError::is_inner)   // a shed call is not worth retrying
+    .await?;
+```
+
+Once enough recent calls have failed, the breaker stops calling the dependency at all, waits, then
+lets a probe through to check whether it came back. Because the clock is injected, you can test
+that whole cycle without sleeping.
+
 ## Tools
 
 Each tool comes with a runnable example. Start there:
 
 - **retry**: async [examples/retry.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/retry.rs) · blocking [examples/blocking_retry.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/blocking_retry.rs)
+- **circuit breaker**: [examples/breaker.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/breaker.rs)
 
 Retries emit `tracing` events out of the box (target `mettle::retry`). Install any subscriber
 (e.g. `tracing_subscriber::fmt::init()`) to see them.
