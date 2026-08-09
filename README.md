@@ -58,6 +58,22 @@ retrying sooner than `base`, so a dependency that frees up early isn't picked up
 Both seed from entropy by default and take a fixed seed (`with_seed`) when you want a test to
 replay the same delays.
 
+When a retry gives up you get a `RetryError`, which says what stopped it:
+
+```rust
+match retry(|| async { fetch(&url).await }).await {
+    Ok(body) => body,
+    Err(e) => {
+        // "max_elapsed after 5 attempts in 29.4s: connection refused"
+        tracing::error!("{} after {} attempts in {:?}: {}",
+            e.stop_reason().as_str(), e.attempts(), e.elapsed(), e.error());
+        return Err(e.into());   // ?-able into Box<dyn Error> / anyhow
+    }
+}
+```
+
+Only want the underlying error? `.map_err(RetryError::into_error)`.
+
 ## Tools
 
 Each tool comes with a runnable example. Start there:

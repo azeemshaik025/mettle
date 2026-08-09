@@ -2,7 +2,8 @@
 
 use super::clock::{Clock, StdClock};
 use crate::backoff::{Backoff, ExponentialBackoff};
-use crate::shared::{should_retry_after, trace_retry};
+use crate::error::RetryError;
+use crate::shared::{Decision, give_up, should_retry_after, trace_retry};
 use std::time::Duration;
 
 /// A configurable blocking retry operation.
@@ -30,8 +31,10 @@ pub struct Retry<F, B, C, P> {
 /// # fn fetch() -> Result<u32, std::io::Error> { Ok(1) }
 /// let value = retry(fetch).call()?;
 /// # let _ = value;
-/// # Ok::<(), std::io::Error>(())
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+///
+/// On failure the error is a [`RetryError`]; for the bare error, `.map_err(RetryError::into_error)`.
 pub fn retry<F, T, E>(op: F) -> Retry<F, ExponentialBackoff, StdClock, fn(&E) -> bool>
 where
     F: FnMut() -> Result<T, E>,
@@ -105,10 +108,15 @@ where
     E: std::fmt::Debug,
 {
     /// Run the operation, blocking between attempts, until it succeeds or gives up.
-    pub fn call(mut self) -> Result<T, E> {
+    ///
+    /// # Errors
+    /// Returns a [`RetryError`] carrying the last error, the attempt count, the elapsed time, and
+    /// why it stopped. For the bare error, `.map_err(RetryError::into_error)`.
+    pub fn call(mut self) -> Result<T, RetryError<E>> {
         let mut backoff = self.backoff;
-        let mut attempt = 0u32;
+        let mut retries = 0u32;
         let start = self.clock.now();
+        let elapsed = || self.clock.now().saturating_duration_since(start);
 
         loop {
             let err = match (self.op)() {
@@ -116,15 +124,15 @@ where
                 Err(err) => err,
             };
 
-            match should_retry_after(&err, &self.when, &mut backoff, self.max_elapsed, || {
-                self.clock.now().saturating_duration_since(start)
-            }) {
-                Some(delay) => {
-                    attempt += 1;
-                    trace_retry(attempt, &err, delay);
+            match should_retry_after(&err, &self.when, &mut backoff, self.max_elapsed, elapsed) {
+                Decision::Retry(delay) => {
+                    retries += 1;
+                    trace_retry(retries, &err, delay);
                     self.clock.sleep(delay);
                 }
-                None => return Err(err),
+                Decision::Stop { reason, elapsed: m } => {
+                    return Err(give_up(err, retries, reason, m, elapsed));
+                }
             }
         }
     }
@@ -134,6 +142,8 @@ where
 mod tests {
     use super::*;
     use crate::backoff::ExponentialBackoffConfig;
+    use crate::error::StopReason;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -143,6 +153,7 @@ mod tests {
         start: Instant,
         elapsed: Arc<Mutex<Duration>>,
         log: Arc<Mutex<Vec<Duration>>>,
+        now_calls: Arc<AtomicUsize>,
     }
     impl MockClock {
         fn new() -> Self {
@@ -150,14 +161,19 @@ mod tests {
                 start: Instant::now(),
                 elapsed: Arc::new(Mutex::new(Duration::ZERO)),
                 log: Arc::new(Mutex::new(Vec::new())),
+                now_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn slept(&self) -> Vec<Duration> {
             self.log.lock().unwrap().clone()
         }
+        fn now_calls(&self) -> usize {
+            self.now_calls.load(SeqCst)
+        }
     }
     impl Clock for MockClock {
         fn now(&self) -> Instant {
+            self.now_calls.fetch_add(1, SeqCst);
             self.start + *self.elapsed.lock().unwrap()
         }
         fn sleep(&self, dur: Duration) {
@@ -182,8 +198,8 @@ mod tests {
     #[test]
     fn succeeds_first_try() {
         let clock = MockClock::new();
-        let result: Result<i32, ()> = retry(|| Ok(42)).clock(clock.clone()).call();
-        assert_eq!(result, Ok(42));
+        let result: Result<i32, RetryError<()>> = retry(|| Ok(42)).clock(clock.clone()).call();
+        assert_eq!(result.unwrap(), 42);
         assert!(clock.slept().is_empty());
     }
 
@@ -191,7 +207,7 @@ mod tests {
     fn retries_then_succeeds() {
         let clock = MockClock::new();
         let mut n = 0;
-        let result: Result<i32, &str> = retry(|| {
+        let result: Result<i32, RetryError<&str>> = retry(|| {
             n += 1;
             if n < 3 { Err("boom") } else { Ok(42) }
         })
@@ -199,7 +215,7 @@ mod tests {
         .clock(clock.clone())
         .call();
 
-        assert_eq!(result, Ok(42));
+        assert_eq!(result.unwrap(), 42);
         assert_eq!(n, 3); // 2 failures + 1 success
         assert_eq!(clock.slept(), vec![secs(1), secs(2)]);
     }
@@ -208,7 +224,7 @@ mod tests {
     fn stops_on_non_retryable() {
         let clock = MockClock::new();
         let mut calls = 0;
-        let result: Result<i32, &str> = retry(|| {
+        let result: Result<i32, RetryError<&str>> = retry(|| {
             calls += 1;
             Err("nope")
         })
@@ -217,7 +233,11 @@ mod tests {
         .when(|_e| false)
         .call();
 
-        assert_eq!(result, Err("nope"));
+        let err = result.unwrap_err();
+        assert_eq!(*err.error(), "nope");
+        assert_eq!(err.stop_reason(), StopReason::NotRetryable);
+        assert_eq!(err.attempts(), 1); // the rejected attempt still ran
+        assert_eq!(err.elapsed(), Duration::ZERO);
         assert_eq!(calls, 1); // exactly one attempt
         assert!(clock.slept().is_empty());
     }
@@ -225,25 +245,36 @@ mod tests {
     #[test]
     fn exhausts_retries() {
         let clock = MockClock::new();
-        let result: Result<i32, &str> = retry(|| Err("always"))
+        let result: Result<i32, RetryError<&str>> = retry(|| Err("always"))
             .backoff(backoff(3))
             .clock(clock.clone())
             .call();
 
-        assert_eq!(result, Err("always"));
+        let err = result.unwrap_err();
+        assert_eq!(*err.error(), "always");
+        assert_eq!(err.stop_reason(), StopReason::RetriesExhausted);
+        assert_eq!(err.attempts(), 4); // 3 retries → 4 attempts
+        assert_eq!(err.elapsed(), secs(7)); // 1 + 2 + 4 on the mock clock
         assert_eq!(clock.slept().len(), 3); // 3 retries → 3 sleeps, then give up
     }
 
     #[test]
     fn stops_on_time_budget() {
         let clock = MockClock::new();
-        let result: Result<i32, &str> = retry(|| Err("slow"))
+        let result: Result<i32, RetryError<&str>> = retry(|| Err("slow"))
             .backoff(backoff(100)) // effectively unlimited retries
             .clock(clock.clone())
             .max_elapsed(secs(10))
             .call();
 
-        assert_eq!(result, Err("slow"));
+        let err = result.unwrap_err();
+        assert_eq!(*err.error(), "slow");
+        assert_eq!(err.stop_reason(), StopReason::MaxElapsed);
+        assert_eq!(err.attempts(), 4);
+        assert!(
+            err.elapsed() < secs(10),
+            "elapsed must stay under the budget"
+        );
         // 1 (→1s), 2 (→3s), 4 (→7s); next would be 8 → 7+8=15 ≥ 10 → stop.
         assert_eq!(clock.slept(), vec![secs(1), secs(2), secs(4)]);
     }
@@ -253,12 +284,12 @@ mod tests {
         // The async twin of this lives in src/retry.rs. Both drivers take any `Backoff`, so both
         // have to be shown driving a randomized one (ADR001 decision 3).
         let clock = MockClock::new();
-        let out: Result<i32, &str> = retry(|| Err("boom"))
+        let out: Result<i32, RetryError<&str>> = retry(|| Err("boom"))
             .backoff(backoff(3).jittered_with_seed(42))
             .clock(&clock)
             .call();
 
-        assert_eq!(out, Err("boom"));
+        assert_eq!(*out.unwrap_err().error(), "boom");
         let slept = clock.slept();
         assert_eq!(slept.len(), 3);
         // Underlying exponential is 1s, 2s, 4s; full jitter can only shrink each one.
@@ -272,7 +303,7 @@ mod tests {
         use crate::backoff::{DecorrelatedBackoff, DecorrelatedBackoffConfig};
 
         let clock = MockClock::new();
-        let out: Result<i32, &str> = retry(|| Err("boom"))
+        let out: Result<i32, RetryError<&str>> = retry(|| Err("boom"))
             .backoff(
                 DecorrelatedBackoff::with_seed(
                     DecorrelatedBackoffConfig {
@@ -287,7 +318,7 @@ mod tests {
             .clock(&clock)
             .call();
 
-        assert_eq!(out, Err("boom"));
+        assert_eq!(*out.unwrap_err().error(), "boom");
         let slept = clock.slept();
         assert_eq!(slept.len(), 4);
         assert!(
@@ -301,15 +332,38 @@ mod tests {
         // `.clock(c)` takes the clock by value, so without the reference impls a test could hand
         // over its mock and never read it back. Both forms must reach the same mock.
         let clock = MockClock::new();
-        let _: Result<i32, &str> = retry(|| Err("x")).backoff(backoff(2)).clock(&clock).call();
+        let _: Result<i32, RetryError<&str>> =
+            retry(|| Err("x")).backoff(backoff(2)).clock(&clock).call();
         assert_eq!(clock.slept(), vec![secs(1), secs(2)]);
 
         let shared = std::sync::Arc::new(MockClock::new());
-        let _: Result<i32, &str> = retry(|| Err("x"))
+        let _: Result<i32, RetryError<&str>> = retry(|| Err("x"))
             .backoff(backoff(2))
             .clock(Arc::clone(&shared))
             .call();
         assert_eq!(shared.slept(), vec![secs(1), secs(2)]);
+    }
+
+    #[test]
+    fn clock_reads_do_not_scale_with_attempts() {
+        // The async twin of this lives in src/retry.rs. `elapsed()` is public now, so both
+        // drivers have to agree on what it costs.
+        for retries in [3, 30] {
+            let clock = MockClock::new();
+            let _: Result<i32, RetryError<&str>> = retry(|| Err("x"))
+                .backoff(backoff(retries))
+                .clock(clock.clone())
+                .call();
+            assert_eq!(clock.now_calls(), 2, "with {retries} retries and no budget");
+        }
+
+        let clock = MockClock::new();
+        let _: Result<i32, RetryError<&str>> = retry(|| Err("x"))
+            .backoff(backoff(3))
+            .clock(clock.clone())
+            .max_elapsed(secs(1000))
+            .call();
+        assert_eq!(clock.now_calls(), 5); // start + 3 decisions + terminal
     }
 
     #[test]
@@ -319,7 +373,7 @@ mod tests {
         let clock = MockClock::new();
         let mut n = 0;
 
-        let out: Result<i32, &str> = retry(|| {
+        let out: Result<i32, RetryError<&str>> = retry(|| {
             n += 1;
             if n < 3 { Err("boom") } else { Ok(42) }
         })
@@ -327,7 +381,7 @@ mod tests {
         .clock(clock)
         .call();
 
-        assert_eq!(out, Ok(42));
+        assert_eq!(out.unwrap(), 42);
         assert_eq!(events.get(), 2); // one event per retry
     }
 }
