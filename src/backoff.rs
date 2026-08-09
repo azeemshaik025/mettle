@@ -72,6 +72,9 @@ pub trait Backoff {
     ///
     /// Don't reach for this in production. A fleet that all seeds the same way retries in
     /// lockstep, which is the thundering herd jitter exists to prevent.
+    ///
+    /// A seed replays the same delays within a build. The exact values are not part of this
+    /// crate's API contract, so assert on properties rather than on specific numbers.
     fn jittered_with_seed(self, seed: u64) -> Jittered<Self>
     where
         Self: Sized,
@@ -254,6 +257,9 @@ impl<B> Jittered<B> {
     }
 
     /// Wrap `inner` with a fixed `seed`, for reproducible tests.
+    ///
+    /// A seed replays the same delays within a build. The exact values are not part of this
+    /// crate's API contract, so assert on properties rather than on specific numbers.
     pub fn with_seed(inner: B, seed: u64) -> Self {
         Self {
             inner,
