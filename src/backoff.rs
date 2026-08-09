@@ -30,22 +30,29 @@ pub trait Backoff {
     /// Delay before the next retry, or `None` to give up (e.g. retries exhausted).
     fn next_delay(&mut self) -> Option<Duration>;
 
-    /// Wrap this strategy so each delay is randomized by `mode` (see [`Jitter`]), seeding the RNG
-    /// from entropy. Composes with any strategy; reach for it to keep a fleet of clients from
-    /// retrying in lockstep:
+    /// Wrap this strategy so every delay becomes a uniform random value in `0 ..= delay`, seeding
+    /// the RNG from entropy.
+    ///
+    /// This is "full jitter" from AWS's *Exponential Backoff and Jitter*. Composes with any
+    /// strategy, including one you wrote, which is the point: reach for it to stop a fleet of
+    /// clients retrying in lockstep.
     ///
     /// ```
-    /// use mettle::{Backoff, ExponentialBackoff, Jitter};
+    /// use mettle::{Backoff, ExponentialBackoff};
     ///
-    /// let mut backoff = ExponentialBackoff::default().jittered(Jitter::Full);
+    /// let mut backoff = ExponentialBackoff::default().jittered();
     /// let delay = backoff.next_delay(); // somewhere in 0 ..= 100ms
     /// # let _ = delay;
     /// ```
-    fn jittered(self, mode: Jitter) -> Jittered<Self>
+    ///
+    /// Because the floor is zero, a retry can fire almost immediately. That is the mechanism, not
+    /// a flaw: it is what lets a freed-up dependency be picked up at once. If you need a floor
+    /// under every wait, use [`DecorrelatedBackoff`] instead, which never goes below its `base`.
+    fn jittered(self) -> Jittered<Self>
     where
         Self: Sized,
     {
-        Jittered::new(self, mode)
+        Jittered::new(self)
     }
 }
 
@@ -114,7 +121,7 @@ impl Default for ExponentialBackoffConfig {
 ///
 /// Delays are deterministic: no jitter is applied, so a given config always yields the same
 /// sequence. Add randomness by wrapping it with [`Backoff::jittered`], for example
-/// `ExponentialBackoff::default().jittered(Jitter::Full)`.
+/// `ExponentialBackoff::default().jittered()`.
 #[derive(Debug, Clone)]
 pub struct ExponentialBackoff {
     factor: NonZeroU32,
@@ -179,34 +186,6 @@ impl Backoff for ExponentialBackoff {
     }
 }
 
-/// How to randomize a backoff's delays, so a fleet of clients doesn't retry in lockstep
-/// (a thundering herd). Applied by wrapping any strategy; see [`Backoff::jittered`].
-///
-/// There is deliberately no `Decorrelated` variant. That formula feeds each drawn delay into the
-/// next range, and a mode applied to one delay at a time has nowhere to keep it, so it ships as
-/// its own strategy: [`DecorrelatedBackoff`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Jitter {
-    /// Each delay becomes a uniform random value in `0 ..= delay`. Maximum spread.
-    Full,
-    /// Each delay becomes a uniform random value in `delay/2 ..= delay`, keeping a floor under
-    /// every wait.
-    Equal,
-}
-
-impl Jitter {
-    fn apply(self, delay: Duration, rng: &mut fastrand::Rng) -> Duration {
-        match self {
-            Self::Full => rand_duration(rng, Duration::ZERO, delay),
-            Self::Equal => {
-                let half = delay / 2;
-                half + rand_duration(rng, Duration::ZERO, delay - half)
-            }
-        }
-    }
-}
-
 /// A uniform random `Duration` in `lo ..= hi`, or `lo` if `hi <= lo`. Computed in `u64`
 /// nanoseconds; real delays sit well below that bound, and larger inputs saturate to it.
 fn rand_duration(rng: &mut fastrand::Rng, lo: Duration, hi: Duration) -> Duration {
@@ -218,7 +197,16 @@ fn rand_duration(rng: &mut fastrand::Rng, lo: Duration, hi: Duration) -> Duratio
     Duration::from_nanos(lo + rng.u64(0..=(hi - lo)))
 }
 
-/// Any [`Backoff`] wrapped to randomize each delay by a [`Jitter`] mode.
+/// Any [`Backoff`] wrapped so each delay becomes a uniform random value in `0 ..= delay`.
+///
+/// This is "full jitter": the widest spread, so the density of clients attempting at any instant
+/// is as low as it can be. There is no mode to choose. AWS's own measurements had the alternative
+/// ("equal jitter", a floor at `delay/2`) doing more work *and* finishing later, so shipping it as
+/// an option would only invite people to pick the worse one.
+///
+/// Want a floor under every wait? That's [`DecorrelatedBackoff`], which never draws below its
+/// `base`. Note the trade: a floor means never retrying sooner than `base`, so a dependency that
+/// frees up early isn't picked up until then.
 ///
 /// The inner strategy stays deterministic; only this layer is random. Its RNG is seedable with
 /// [`with_seed`](Jittered::with_seed) so jittered retries stay reproducible in tests. Usually
@@ -229,25 +217,22 @@ fn rand_duration(rng: &mut fastrand::Rng, lo: Duration, hi: Duration) -> Duratio
 #[derive(Debug)]
 pub struct Jittered<B> {
     inner: B,
-    mode: Jitter,
     rng: fastrand::Rng,
 }
 
 impl<B> Jittered<B> {
     /// Wrap `inner`, seeding the RNG from entropy.
-    pub fn new(inner: B, mode: Jitter) -> Self {
+    pub fn new(inner: B) -> Self {
         Self {
             inner,
-            mode,
             rng: fastrand::Rng::new(),
         }
     }
 
     /// Wrap `inner` with a fixed `seed`, for reproducible tests.
-    pub fn with_seed(inner: B, mode: Jitter, seed: u64) -> Self {
+    pub fn with_seed(inner: B, seed: u64) -> Self {
         Self {
             inner,
-            mode,
             rng: fastrand::Rng::with_seed(seed),
         }
     }
@@ -256,7 +241,7 @@ impl<B> Jittered<B> {
 impl<B: Backoff> Backoff for Jittered<B> {
     fn next_delay(&mut self) -> Option<Duration> {
         let delay = self.inner.next_delay()?;
-        Some(self.mode.apply(delay, &mut self.rng))
+        Some(rand_duration(&mut self.rng, Duration::ZERO, delay))
     }
 }
 
@@ -301,13 +286,13 @@ impl Default for DecorrelatedBackoffConfig {
 /// # Ok::<_, mettle::BackoffConfigError>(())
 /// ```
 ///
-/// This is a strategy rather than a [`Jitter`] mode because the randomness lives in the
-/// recurrence: each range is set by the delay that was actually drawn last time, so there is no
-/// deterministic sequence underneath for [`Jittered`] to wrap.
+/// This is a strategy of its own rather than something [`Jittered`] could produce, because the
+/// randomness lives in the recurrence: each range is set by the delay that was actually drawn last
+/// time, so there is no deterministic sequence underneath to wrap.
 ///
 /// One thing differs from [`ExponentialBackoff`]: the first delay is already random, somewhere in
 /// `base ..= base * 3`, rather than exactly `base`. Against a jittered exponential, the difference
-/// is the floor. Every delay here is at least `base`, where [`Jitter::Full`] can return anything
+/// is the floor. Every delay here is at least `base`, where [`Backoff::jittered`] can return anything
 /// down to zero. Don't stack the two by calling [`jittered`](Backoff::jittered) on this: the
 /// randomness is already in the recurrence, and wrapping it throws the `base` floor away.
 ///
@@ -505,7 +490,7 @@ mod tests {
         // Full jitter: every delay lies in [0, the underlying delay], and the sequence still ends
         // exactly when the inner strategy is exhausted.
         let plain = drain(exp6());
-        let mut j = Jittered::with_seed(exp6(), Jitter::Full, 42);
+        let mut j = Jittered::with_seed(exp6(), 42);
         for p in &plain {
             let d = j.next_delay().unwrap();
             assert!(
@@ -517,98 +502,42 @@ mod tests {
     }
 
     #[test]
-    fn equal_jitter_keeps_a_floor() {
-        // Equal jitter: every delay lies in [d/2, d].
-        let plain = drain(exp6());
-        let mut j = Jittered::with_seed(exp6(), Jitter::Equal, 99);
-        for p in &plain {
-            let d = j.next_delay().unwrap();
-            assert!(
-                d >= *p / 2 && d <= *p,
-                "equal jitter out of [d/2, d]: {d:?} for {p:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn equal_jitter_floor_is_half_the_delay_not_the_previous_step() {
-        // Executable documentation rather than extra coverage. `Equal`'s floor is `delay / 2`,
-        // and with the default `factor: 2` that is also the previous ladder value, so the two
-        // readings are easy to confuse. A factor of 3 separates them: at the 9s step the previous
-        // delay is 3s but the floor is 4.5s.
-        //
-        // `Jitter::apply` takes one `Duration` and keeps no history, so the previous-step reading
-        // isn't implementable today and this can't fail without a structural change. It is here to
-        // stop that change being made by accident, and to state the rule at a factor where the
-        // coincidence doesn't hide it.
-        let ladder = drain(exp(1, 3, 10_000, 4)); // 1s, 3s, 9s, 27s
-        assert_eq!(ladder[2], secs(9));
-        assert_eq!(
-            ladder[1],
-            secs(3),
-            "the previous step, which is NOT the floor"
-        );
-
-        for seed in 0..256 {
-            let mut j = Jittered::with_seed(exp(1, 3, 10_000, 4), Jitter::Equal, seed);
-            for (i, plain) in ladder.iter().enumerate() {
-                let d = j.next_delay().unwrap();
-                assert!(
-                    d >= *plain / 2,
-                    "step {i} drew {d:?}, below half of {plain:?} (seed {seed})"
-                );
-                assert!(
-                    d <= *plain,
-                    "step {i} drew {d:?}, above {plain:?} (seed {seed})"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn seed_makes_jitter_reproducible() {
         // Same seed yields an identical sequence (so jittered retries stay testable); different
-        // seeds generally differ, which guards against a constant or broken RNG. Both modes, so
-        // neither can quietly become a no-op that still satisfies its bounds.
-        for mode in [Jitter::Full, Jitter::Equal] {
-            let seq = |seed| drain(Jittered::with_seed(exp6(), mode, seed));
-            assert_eq!(seq(7), seq(7), "{mode:?} was not reproducible");
-            assert_ne!(seq(1), seq(2), "{mode:?} ignored its seed");
-        }
+        // seeds generally differ, which guards against a constant or broken RNG.
+        let seq = |seed| drain(Jittered::with_seed(exp6(), seed));
+        assert_eq!(seq(7), seq(7));
+        assert_ne!(seq(1), seq(2));
     }
 
     #[test]
     fn jitter_actually_moves_the_delay() {
-        // Bounds checks alone are satisfied by the identity function, so pin that each mode
-        // really randomizes: `Full` must reach below the halfway mark, `Equal` must land strictly
-        // inside (d/2, d) at least once.
-        let full = drain(Jittered::with_seed(exp6(), Jitter::Full, 5));
+        // `d <= p` alone is satisfied by the identity function, so pin that jitter really
+        // randomizes: across the sequence it must land both below and above the halfway mark.
+        let jittered = drain(Jittered::with_seed(exp6(), 5));
         let plain = drain(exp6());
         assert!(
-            full.iter().zip(&plain).any(|(d, p)| *d < *p / 2),
-            "full jitter never dropped below half the base delay"
+            jittered.iter().zip(&plain).any(|(d, p)| *d < *p / 2),
+            "jitter never dropped below half the plain delay"
         );
-        let equal = drain(Jittered::with_seed(exp6(), Jitter::Equal, 5));
         assert!(
-            equal
-                .iter()
-                .zip(&plain)
-                .any(|(d, p)| *d > *p / 2 && *d < *p),
-            "equal jitter never landed strictly inside (d/2, d)"
+            jittered.iter().zip(&plain).any(|(d, p)| *d > *p / 2),
+            "jitter never rose above half the plain delay"
         );
     }
 
     #[test]
-    fn jittered_combinator_passes_the_mode_through() {
+    fn jittered_combinator_wraps_the_inner_strategy() {
         // `Backoff::jittered` is the documented entry point, so drive it rather than only the
-        // `Jittered::` constructors. `Equal` keeps a floor that `Full` does not.
-        let mut b = exp6().jittered(Jitter::Equal);
+        // `Jittered::` constructors. It must bound each delay by the inner strategy's own value
+        // and end exactly when the inner one does.
+        let mut b = exp6().jittered();
         let plain = drain(exp6());
         for p in &plain {
             let d = b.next_delay().unwrap();
             assert!(
-                d >= *p / 2 && d <= *p,
-                "combinator lost the mode: {d:?} for {p:?}"
+                d <= *p,
+                "combinator exceeded the inner delay: {d:?} for {p:?}"
             );
         }
         assert_eq!(b.next_delay(), None);
@@ -619,10 +548,7 @@ mod tests {
         // The entropy-seeded path is what stops a fleet retrying in lockstep, and it's the reason
         // these types aren't `Clone`. A regression to a fixed seed would pass every other test
         // here. Two independent RNGs colliding across six delays is a 2^-64 event.
-        assert_ne!(
-            drain(exp6().jittered(Jitter::Full)),
-            drain(exp6().jittered(Jitter::Full))
-        );
+        assert_ne!(drain(exp6().jittered()), drain(exp6().jittered()));
     }
 
     #[test]
@@ -635,7 +561,7 @@ mod tests {
             }
         }
         let inner = Fixed(vec![Duration::ZERO, Duration::MAX, secs(1)].into_iter());
-        let mut j = Jittered::with_seed(inner, Jitter::Full, 1);
+        let mut j = Jittered::with_seed(inner, 1);
         assert_eq!(j.next_delay(), Some(Duration::ZERO)); // rand(0..=0)
         let _ = j.next_delay().unwrap(); // Duration::MAX saturates, no panic
         assert!(j.next_delay().unwrap() <= secs(1));

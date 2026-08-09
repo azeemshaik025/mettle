@@ -724,11 +724,7 @@ mod tests {
     async fn drives_a_jittered_backoff() {
         let clock = MockClock::new();
         let out: Result<i32, &str> = retry(|| async { Err("boom") })
-            .backoff(crate::backoff::Jittered::with_seed(
-                backoff(3),
-                crate::backoff::Jitter::Full,
-                42,
-            ))
+            .backoff(crate::backoff::Jittered::with_seed(backoff(3), 42))
             .clock(clock.clone())
             .await;
 

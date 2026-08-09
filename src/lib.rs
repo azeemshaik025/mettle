@@ -60,7 +60,7 @@ mod test_support;
 
 pub use backoff::{
     Backoff, BackoffConfigError, DecorrelatedBackoff, DecorrelatedBackoffConfig,
-    ExponentialBackoff, ExponentialBackoffConfig, Jitter, Jittered,
+    ExponentialBackoff, ExponentialBackoffConfig, Jittered,
 };
 #[cfg(feature = "async")]
 pub use clock::Clock;

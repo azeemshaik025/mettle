@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-08-09
 
 ### Added
-- Jitter for backoff: the `Jitter` mode (`Full` / `Equal`) and a `Backoff::jittered(..)` combinator
-  that wraps any strategy, so a fleet of clients doesn't retry in lockstep. Opt-in; the RNG is
-  seedable for reproducible tests.
+- Jitter for backoff: `Backoff::jittered()` wraps any strategy so each delay becomes a uniform
+  random value in `0 ..= delay` ("full jitter"), so a fleet of clients doesn't retry in lockstep.
+  Opt-in; the RNG is seedable for reproducible tests.
+
+  There is no mode to pick. AWS's measurements had the alternative ("equal jitter", a floor at
+  `delay/2`) doing more work *and* finishing later than full jitter, and a simulation of mettle's
+  own implementations reproduced that in every configuration tried, so offering it would only
+  invite people to choose the worse one. For a floor under every wait, use `DecorrelatedBackoff`.
 - `DecorrelatedBackoff`, built from a validated `DecorrelatedBackoffConfig`: each delay is drawn
   from `base ..= prev * 3`, capped at `max_delay` (the AWS "Exponential Backoff and Jitter"
   formula). It's a strategy rather than a `Jitter` mode because the randomness lives in the

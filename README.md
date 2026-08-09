@@ -41,14 +41,19 @@ Retrying on a fixed schedule means every client that failed together retries tog
 that is coming back up gets a synchronized wave. Jitter spreads them out:
 
 ```rust
-use mettle::{Backoff, DecorrelatedBackoff, DecorrelatedBackoffConfig, ExponentialBackoff, Jitter};
+use mettle::{Backoff, DecorrelatedBackoff, DecorrelatedBackoffConfig, ExponentialBackoff};
 
-// Randomize any strategy's delays...
-let backoff = ExponentialBackoff::default().jittered(Jitter::Full);
+// Randomize any strategy's delays into 0 ..= delay ("full jitter")...
+let backoff = ExponentialBackoff::default().jittered();
 
 // ...or use decorrelated jitter, where each delay is drawn from the previous one.
 let backoff = DecorrelatedBackoff::new(DecorrelatedBackoffConfig::default())?;
 ```
+
+Which one: `.jittered()` works on any strategy, including one you wrote, and spreads delays as
+widely as possible. `DecorrelatedBackoff` is its own strategy and never draws below its `base`, so
+reach for it when you want a floor under every wait. The trade is that a floor also means never
+retrying sooner than `base`, so a dependency that frees up early isn't picked up until then.
 
 Both seed from entropy by default and take a fixed seed (`with_seed`) when you want a test to
 replay the same delays.
