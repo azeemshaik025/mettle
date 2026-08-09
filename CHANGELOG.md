@@ -39,6 +39,17 @@ bare error and keep an existing signature, add `.map_err(RetryError::into_error)
 
 Matching on the error goes through an accessor, so `match e` becomes `match e.error()`.
 
+Tests that asserted on the whole `Result` need the error unwrapped. `RetryError` is deliberately
+not `PartialEq`, and could not usefully be: its fields are private with no public constructor, so
+there is no way to build the right-hand side to compare against.
+
+```diff
+-assert_eq!(result, Err(MyError::Timeout));
++assert_eq!(*result.unwrap_err().error(), MyError::Timeout);
+-assert_eq!(result, Ok(42));
++assert_eq!(result.unwrap(), 42);
+```
+
 `RetryError` deliberately has no `source()`. Why, and why its `Error` impl is bounded on
 `E: Debug + Display` rather than `E: Error`:
 [ADR006](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR006.md).
