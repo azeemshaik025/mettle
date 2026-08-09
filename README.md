@@ -37,6 +37,22 @@ let body = retry(|| async { fetch(&url).await })
 
 No async runtime? The blocking twin is identical but ends in `.call()` instead of `.await`.
 
+Retrying on a fixed schedule means every client that failed together retries together, so a service
+that is coming back up gets a synchronized wave. Jitter spreads them out:
+
+```rust
+use mettle::{Backoff, DecorrelatedBackoff, DecorrelatedBackoffConfig, ExponentialBackoff, Jitter};
+
+// Randomize any strategy's delays...
+let backoff = ExponentialBackoff::default().jittered(Jitter::Full);
+
+// ...or use decorrelated jitter, where each delay is drawn from the previous one.
+let backoff = DecorrelatedBackoff::new(DecorrelatedBackoffConfig::default())?;
+```
+
+Both seed from entropy by default and take a fixed seed (`with_seed`) when you want a test to
+replay the same delays.
+
 ## Tools
 
 Each tool comes with a runnable example. Start there:

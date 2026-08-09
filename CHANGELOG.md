@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-09
+
 ### Added
 - Jitter for backoff: the `Jitter` mode (`Full` / `Equal`) and a `Backoff::jittered(..)` combinator
   that wraps any strategy, so a fleet of clients doesn't retry in lockstep. Opt-in; the RNG is
@@ -16,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formula). It's a strategy rather than a `Jitter` mode because the randomness lives in the
   recurrence, so there's no deterministic sequence for `Jittered` to wrap. Seedable via
   `DecorrelatedBackoff::with_seed`.
+- Documented that `ExponentialBackoffConfig { factor: 1, .. }` gives a constant delay, so there is
+  no separate `ConstantBackoff` type to learn.
 
 The randomized strategies (`DecorrelatedBackoff`, `Jittered`) are deliberately not `Clone`. A copy
 would carry the RNG state and replay the same delays, which is the lockstep jitter exists to
