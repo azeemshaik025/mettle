@@ -9,3 +9,5 @@ changes, edit its file and say what changed and why.
 | [001](ADR001.md) | Sans-IO core, hand-written async, one crate | Accepted |
 | [002](ADR002.md) | Public API, open traits, one validated `Backoff` | Accepted |
 | [003](ADR003.md) | Dependencies and Cargo features | Accepted |
+| [004](ADR004.md) | Jitter, a fourth dependency, and `Clone` | Accepted |
+| [005](ADR005.md) | Making the tested path as usable as the production path | Accepted |

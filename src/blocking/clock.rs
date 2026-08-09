@@ -17,6 +17,28 @@ pub trait Clock {
     fn sleep(&self, dur: Duration);
 }
 
+// Same reasoning as the async twin: a test wants to keep its mock so it can advance time and read
+// back what was slept, and without these `.clock(&mock)` doesn't compile.
+impl<C: Clock + ?Sized> Clock for &C {
+    fn now(&self) -> Instant {
+        (**self).now()
+    }
+
+    fn sleep(&self, dur: Duration) {
+        (**self).sleep(dur);
+    }
+}
+
+impl<C: Clock + ?Sized> Clock for std::sync::Arc<C> {
+    fn now(&self) -> Instant {
+        (**self).now()
+    }
+
+    fn sleep(&self, dur: Duration) {
+        (**self).sleep(dur);
+    }
+}
+
 /// A [`Clock`] backed by [`std::thread::sleep`] and [`std::time::Instant`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StdClock;

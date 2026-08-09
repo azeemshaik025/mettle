@@ -11,9 +11,15 @@
 //! - `.max_elapsed(d)` gives up once the next wait would push total time past `d`
 //! - `.clock(clock)` supplies the time source (default: Tokio)
 //!
+//! The default schedule is deterministic, which means a fleet of clients that failed together
+//! retries together. `.jittered()` spreads them out; see step 4.
+//!
 //! Run with: `cargo run --example retry`
 
-use mettle::{ExponentialBackoff, ExponentialBackoffConfig, retry};
+use mettle::{
+    Backoff, DecorrelatedBackoff, DecorrelatedBackoffConfig, ExponentialBackoff,
+    ExponentialBackoffConfig, retry,
+};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 
@@ -24,7 +30,7 @@ enum FetchError {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), mettle::BackoffConfigError> {
     // 1) Simplest form: pass the operation, take every default.
     let result = retry(flaky_fetch).await;
     println!("1. defaults:  {result:?}"); // Ok("user data"), succeeds on attempt 3
@@ -42,6 +48,27 @@ async fn main() {
         .when(|e| matches!(e, FetchError::Timeout))
         .await;
     println!("3. full:      {result:?}"); // Ok("user data"), succeeds on attempt 3
+
+    // 4) Jitter, so a fleet doesn't retry in lockstep. `.jittered()` randomizes each delay into
+    //    `0 ..= delay`; `DecorrelatedBackoff` instead draws each delay from the previous one and
+    //    never goes below `base`. Both are opt-in: the default above stays deterministic.
+    let result = retry(flaky_fetch)
+        .backoff(fast_backoff().jittered())
+        .when(|e| matches!(e, FetchError::Timeout))
+        .await;
+    println!("4. jittered:  {result:?}"); // same outcome, unpredictable delays
+
+    let result = retry(flaky_fetch)
+        .backoff(DecorrelatedBackoff::new(DecorrelatedBackoffConfig {
+            base: Duration::from_millis(20),
+            max_retries: 5,
+            max_delay: Duration::from_secs(1),
+        })?)
+        .when(|e| matches!(e, FetchError::Timeout))
+        .await;
+    println!("5. decorrel.: {result:?}"); // every delay at least 20ms
+
+    Ok(())
 }
 
 /// A flaky call: fails with `Timeout` twice, then succeeds. It resets after each success, so it

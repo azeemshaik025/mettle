@@ -685,4 +685,55 @@ mod tests {
         assert_eq!(out, Ok(42));
         assert_eq!(events.get(), 2); // one event per retry
     }
+
+    // --- randomized strategies driven through the real driver ---
+
+    #[tokio::test]
+    async fn drives_a_decorrelated_backoff() {
+        // The backoff tests cover the delay sequence in isolation; this covers the wiring, that a
+        // strategy holding its own RNG survives being moved into the future and polled. Seeded, so
+        // the delays are fixed even though the strategy is randomized.
+        use crate::backoff::{DecorrelatedBackoff, DecorrelatedBackoffConfig};
+
+        let clock = MockClock::new();
+        let out: Result<i32, &str> = retry(|| async { Err("boom") })
+            .backoff(
+                DecorrelatedBackoff::with_seed(
+                    DecorrelatedBackoffConfig {
+                        base: secs(1),
+                        max_retries: 4,
+                        max_delay: secs(20),
+                    },
+                    7,
+                )
+                .unwrap(),
+            )
+            .clock(clock.clone())
+            .await;
+
+        assert_eq!(out, Err("boom"));
+        let slept = clock.slept();
+        assert_eq!(slept.len(), 4); // max_retries sleeps, then give up
+        assert!(
+            slept.iter().all(|d| *d >= secs(1) && *d <= secs(20)),
+            "delays escaped [base, max_delay]: {slept:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drives_a_jittered_backoff() {
+        let clock = MockClock::new();
+        let out: Result<i32, &str> = retry(|| async { Err("boom") })
+            .backoff(crate::backoff::Jittered::with_seed(backoff(3), 42))
+            .clock(clock.clone())
+            .await;
+
+        assert_eq!(out, Err("boom"));
+        // Underlying exponential is 1s, 2s, 4s; full jitter can only shrink each one.
+        let slept = clock.slept();
+        assert_eq!(slept.len(), 3);
+        for (d, cap) in slept.iter().zip([secs(1), secs(2), secs(4)]) {
+            assert!(*d <= cap, "jittered delay {d:?} exceeded {cap:?}");
+        }
+    }
 }

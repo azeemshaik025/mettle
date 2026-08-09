@@ -4,7 +4,7 @@
 //! don't hand-roll retry-and-backoff logic in every project.
 //!
 //! Available now: `retry()` (async) and `blocking::retry()` (sync), both with configurable
-//! backoff. Timeout and circuit breaking are planned.
+//! backoff and optional jitter. Timeout and circuit breaking are planned.
 //!
 //! # Quickstart
 //!
@@ -26,6 +26,29 @@
 //! Override the backoff, clock, retry predicate (`.when`), or time budget (`.max_elapsed`) with
 //! the builder methods, then `.await`. No async runtime? The blocking twin is identical but ends
 //! in `.call()` instead of `.await`.
+//!
+//! # Jitter
+//!
+//! A fixed schedule means every client that failed together retries together, so a service coming
+//! back up gets a synchronized wave. Two ways to spread that out, both opt-in:
+//!
+//! ```
+//! use mettle::{Backoff, DecorrelatedBackoff, DecorrelatedBackoffConfig, ExponentialBackoff};
+//!
+//! // Randomize any strategy's delays into `0 ..= delay` ("full jitter").
+//! let spread = ExponentialBackoff::default().jittered();
+//!
+//! // Or draw each delay from the previous one, never below `base`.
+//! let floored = DecorrelatedBackoff::new(DecorrelatedBackoffConfig::default())?;
+//! # let _ = (spread, floored);
+//! # Ok::<_, mettle::BackoffConfigError>(())
+//! ```
+//!
+//! [`jittered`](Backoff::jittered) wraps any strategy, including one you wrote.
+//! [`DecorrelatedBackoff`] is its own strategy and keeps a floor under every wait, at the cost of
+//! never retrying sooner than `base`. Both seed from entropy; use
+//! [`jittered_with_seed`](Backoff::jittered_with_seed) or
+//! [`DecorrelatedBackoff::with_seed`] when a test needs the delays to repeat.
 //!
 //! # Observability
 //!
@@ -58,7 +81,10 @@ mod shared;
 #[cfg(test)]
 mod test_support;
 
-pub use backoff::{Backoff, BackoffConfigError, ExponentialBackoff, ExponentialBackoffConfig};
+pub use backoff::{
+    Backoff, BackoffConfigError, DecorrelatedBackoff, DecorrelatedBackoffConfig,
+    ExponentialBackoff, ExponentialBackoffConfig, Jittered,
+};
 #[cfg(feature = "async")]
 pub use clock::Clock;
 #[cfg(feature = "async")]
