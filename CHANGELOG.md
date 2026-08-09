@@ -9,44 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - 2026-08-09
 
+Adds jitter. Purely additive apart from one collision noted under Upgrading.
+
 ### Added
-- Jitter for backoff: `Backoff::jittered()` wraps any strategy so each delay becomes a uniform
-  random value in `0 ..= delay` ("full jitter"), so a fleet of clients doesn't retry in lockstep.
-  Opt-in; the RNG is seedable for reproducible tests.
+- `Backoff::jittered()` and `Backoff::jittered_with_seed(seed)`. Wraps any strategy, including one
+  you wrote, so each delay becomes a uniform random value in `0 ..= delay` ("full jitter"). Opt-in:
+  the default schedule stays deterministic. The seeded form is for tests.
+- `DecorrelatedBackoff`, from a validated `DecorrelatedBackoffConfig`. Draws each delay from
+  `base ..= prev * 3`, capped at `max_delay`, and never below `base`. Seedable with `with_seed`.
+- `Clock` for `&C` and `Arc<C>`, on both the async and blocking traits, so a mock clock can be
+  passed as `.clock(&mock)` and still be read afterwards.
+- `ExponentialBackoffConfig { factor: 1, .. }` documented as the way to get a constant delay; there
+  is no separate `ConstantBackoff` type.
 
-  There is no mode to pick. AWS's measurements had the alternative ("equal jitter", a floor at
-  `delay/2`) doing more work *and* finishing later than full jitter, and a simulation of mettle's
-  own implementations reproduced that in every configuration tried, so offering it would only
-  invite people to choose the worse one. For a floor under every wait, use `DecorrelatedBackoff`.
-- `DecorrelatedBackoff`, built from a validated `DecorrelatedBackoffConfig`: each delay is drawn
-  from `base ..= prev * 3`, capped at `max_delay` (the AWS "Exponential Backoff and Jitter"
-  formula). It's a strategy rather than a `Jitter` mode because the randomness lives in the
-  recurrence, so there's no deterministic sequence for `Jittered` to wrap. Seedable via
-  `DecorrelatedBackoff::with_seed`.
-- `Backoff::jittered_with_seed(seed)`, so the ergonomic combinator can be seeded too. Previously
-  the readable form couldn't be made deterministic and the deterministic form meant naming
-  `Jittered` directly, which made a test and its production config look nothing alike.
-- `Clock` is now implemented for `&C` and `Arc<C>` (both the async and blocking traits). Writing a
-  mock clock and passing `.clock(&mock)` used to be a compile error, forcing every mock to wrap its
-  own state in `Rc`/`Arc` just to be usable. That was friction on the exact path this crate exists
-  to make easy.
+### Changed
+- New required dependency: `fastrand` (no transitive dependencies, not feature-gated).
 
-  **One way this can break you.** If you already wrote `impl Clock for &YourClock` yourself, most
-  likely as a workaround for the above, that now collides with the impl this release adds and the
-  build fails with `E0119: conflicting implementations`. The fix is to delete your impl, which this
-  release makes redundant. Nothing else in 0.3.0 changes an existing signature, and
-  `cargo-semver-checks` does not flag added impls, so this is called out here rather than left to
-  be discovered.
-- Documented that `ExponentialBackoffConfig { factor: 1, .. }` gives a constant delay, so there is
-  no separate `ConstantBackoff` type to learn.
+### Upgrading
 
-The randomized strategies (`DecorrelatedBackoff`, `Jittered`) are deliberately not `Clone`. A copy
-would carry the RNG state and replay the same delays, which is the lockstep jitter exists to
-prevent; clone the config and build a fresh strategy instead.
+0.2.0 code compiles unchanged, with one exception. If you wrote `impl Clock for &YourClock`
+yourself, it now collides with the impl this release adds and the build fails with
+`E0119: conflicting implementations`. Delete yours; this release makes it redundant.
+`cargo-semver-checks` does not flag added impls, so it would not have warned you.
 
-Jitter needs a random number generator, so this adds `fastrand` as a required dependency (1198
-lines, no transitive dependencies of its own). It is not behind a feature flag; ADR004 records the
-measurements and the reasoning.
+`Jittered` and `DecorrelatedBackoff` are deliberately not `Clone`, because a copy carries the RNG
+state and replays the same delays. Keep the config and build a fresh strategy from it.
+
+Why any of this is shaped the way it is, including why there is no jitter *mode* to choose:
+[ADR004](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR004.md).
 
 ## [0.2.0] - 2026-07-26
 
