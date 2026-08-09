@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mock clock and passing `.clock(&mock)` used to be a compile error, forcing every mock to wrap its
   own state in `Rc`/`Arc` just to be usable. That was friction on the exact path this crate exists
   to make easy.
+
+  **One way this can break you.** If you already wrote `impl Clock for &YourClock` yourself, most
+  likely as a workaround for the above, that now collides with the impl this release adds and the
+  build fails with `E0119: conflicting implementations`. The fix is to delete your impl, which this
+  release makes redundant. Nothing else in 0.3.0 changes an existing signature, and
+  `cargo-semver-checks` does not flag added impls, so this is called out here rather than left to
+  be discovered.
 - Documented that `ExponentialBackoffConfig { factor: 1, .. }` gives a constant delay, so there is
   no separate `ConstantBackoff` type to learn.
 
