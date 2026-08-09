@@ -249,6 +249,70 @@ mod tests {
     }
 
     #[test]
+    fn drives_a_jittered_backoff() {
+        // The async twin of this lives in src/retry.rs. Both drivers take any `Backoff`, so both
+        // have to be shown driving a randomized one (ADR001 decision 3).
+        let clock = MockClock::new();
+        let out: Result<i32, &str> = retry(|| Err("boom"))
+            .backoff(backoff(3).jittered_with_seed(42))
+            .clock(&clock)
+            .call();
+
+        assert_eq!(out, Err("boom"));
+        let slept = clock.slept();
+        assert_eq!(slept.len(), 3);
+        // Underlying exponential is 1s, 2s, 4s; full jitter can only shrink each one.
+        for (d, cap) in slept.iter().zip([secs(1), secs(2), secs(4)]) {
+            assert!(*d <= cap, "jittered delay {d:?} exceeded {cap:?}");
+        }
+    }
+
+    #[test]
+    fn drives_a_decorrelated_backoff() {
+        use crate::backoff::{DecorrelatedBackoff, DecorrelatedBackoffConfig};
+
+        let clock = MockClock::new();
+        let out: Result<i32, &str> = retry(|| Err("boom"))
+            .backoff(
+                DecorrelatedBackoff::with_seed(
+                    DecorrelatedBackoffConfig {
+                        base: secs(1),
+                        max_retries: 4,
+                        max_delay: secs(20),
+                    },
+                    7,
+                )
+                .unwrap(),
+            )
+            .clock(&clock)
+            .call();
+
+        assert_eq!(out, Err("boom"));
+        let slept = clock.slept();
+        assert_eq!(slept.len(), 4);
+        assert!(
+            slept.iter().all(|d| *d >= secs(1) && *d <= secs(20)),
+            "delays escaped [base, max_delay]: {slept:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_borrowed_or_shared_clock() {
+        // `.clock(c)` takes the clock by value, so without the reference impls a test could hand
+        // over its mock and never read it back. Both forms must reach the same mock.
+        let clock = MockClock::new();
+        let _: Result<i32, &str> = retry(|| Err("x")).backoff(backoff(2)).clock(&clock).call();
+        assert_eq!(clock.slept(), vec![secs(1), secs(2)]);
+
+        let shared = std::sync::Arc::new(MockClock::new());
+        let _: Result<i32, &str> = retry(|| Err("x"))
+            .backoff(backoff(2))
+            .clock(Arc::clone(&shared))
+            .call();
+        assert_eq!(shared.slept(), vec![secs(1), secs(2)]);
+    }
+
+    #[test]
     fn emits_a_tracing_event_per_retry() {
         // The op fails twice then succeeds → exactly two `mettle::retry` events.
         let events = crate::test_support::count_retry_events();
