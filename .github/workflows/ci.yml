@@ -26,31 +26,69 @@ jobs:
       - run: cargo test ${{ matrix.features }}
 
   lint:
+    name: lint (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - --all-features
+          - --no-default-features --features async
+          - --no-default-features --features blocking
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Every feature combination, not just the union. A lint that only ever sees `--all-features`
+      # never looks at the code a minimal build actually compiles.
+      - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+      # Formatting does not vary by feature, so this is one job rather than a matrix.
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   docs:
+    name: docs (${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - --all-features
+          - --no-default-features --features async
+          - --no-default-features --features blocking
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc --all-features --no-deps
+      # Matrixed because an intra-doc link can point at a feature-gated item and resolve fine
+      # under `--all-features` while breaking every smaller build.
+      - run: cargo doc ${{ matrix.features }} --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
   msrv:
-    name: msrv (1.85)
+    name: msrv 1.85 (${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - --all-features
+          - --no-default-features --features async
+          - --no-default-features --features blocking
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
-      - run: cargo check --all-features
+      # --all-targets so examples and tests are held to the MSRV too; a plain `cargo check`
+      # compiles neither.
+      - run: cargo check --all-targets ${{ matrix.features }}
 
   semver:
     runs-on: ubuntu-latest

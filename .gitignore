@@ -3,3 +3,4 @@ learning/
 
 # Rust build output
 /target
+.DS_Store
