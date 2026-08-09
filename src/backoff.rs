@@ -531,6 +531,41 @@ mod tests {
     }
 
     #[test]
+    fn equal_jitter_floor_is_half_the_delay_not_the_previous_step() {
+        // Executable documentation rather than extra coverage. `Equal`'s floor is `delay / 2`,
+        // and with the default `factor: 2` that is also the previous ladder value, so the two
+        // readings are easy to confuse. A factor of 3 separates them: at the 9s step the previous
+        // delay is 3s but the floor is 4.5s.
+        //
+        // `Jitter::apply` takes one `Duration` and keeps no history, so the previous-step reading
+        // isn't implementable today and this can't fail without a structural change. It is here to
+        // stop that change being made by accident, and to state the rule at a factor where the
+        // coincidence doesn't hide it.
+        let ladder = drain(exp(1, 3, 10_000, 4)); // 1s, 3s, 9s, 27s
+        assert_eq!(ladder[2], secs(9));
+        assert_eq!(
+            ladder[1],
+            secs(3),
+            "the previous step, which is NOT the floor"
+        );
+
+        for seed in 0..256 {
+            let mut j = Jittered::with_seed(exp(1, 3, 10_000, 4), Jitter::Equal, seed);
+            for (i, plain) in ladder.iter().enumerate() {
+                let d = j.next_delay().unwrap();
+                assert!(
+                    d >= *plain / 2,
+                    "step {i} drew {d:?}, below half of {plain:?} (seed {seed})"
+                );
+                assert!(
+                    d <= *plain,
+                    "step {i} drew {d:?}, above {plain:?} (seed {seed})"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn seed_makes_jitter_reproducible() {
         // Same seed yields an identical sequence (so jittered retries stay testable); different
         // seeds generally differ, which guards against a constant or broken RNG. Both modes, so
