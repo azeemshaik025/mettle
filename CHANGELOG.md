@@ -9,22 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-08-09
 
-### Changed
-- **Breaking:** `retry(..).await` and `blocking::retry(..).call()` now fail with `RetryError<E>`
-  instead of `E`. It carries the last error plus `attempts()`, `elapsed()`, and a `stop_reason()`
-  of `RetriesExhausted` / `NotRetryable` / `MaxElapsed`, so a failed retry says which limit it hit
-  rather than leaving you to guess. To keep the old signature, add
-  `.map_err(RetryError::into_error)`.
+Retry now reports why it gave up, not just what failed last. Breaking.
 
-  `?` into `Box<dyn Error>` and `anyhow::Error` keeps working and now covers error types it didn't
-  before (`String`, `Box<dyn Error>`, `anyhow::Error`), because `RetryError` implements
-  `std::error::Error` for `E: Debug + Display` rather than `E: Error`. The trade is that it has no
-  `source()`; the inner error's text rides along in `Display`. ADR005 has the reasoning.
-- **Breaking:** giving up now emits one more `tracing` event on target `mettle::retry`, with
-  `attempts`, `elapsed_ms`, and `reason`, but only when at least one retry actually happened.
-  Anyone counting events on that target sees a change.
+### Added
+- `RetryError<E>`, with `error()`, `into_error()`, `attempts()`, `elapsed()` and `stop_reason()`.
+- `StopReason`: `RetriesExhausted`, `NotRetryable`, `MaxElapsed`, plus `as_str()` for metric labels.
+
+### Changed
+- **Breaking:** `retry(..).await` and `blocking::retry(..).call()` fail with `RetryError<E>` instead
+  of `E`.
+- **Breaking:** giving up emits one more `tracing` event on `mettle::retry`, carrying `attempts`,
+  `elapsed_ms` and `reason`. It fires only when at least one retry happened, so a `.when(..)` filter
+  rejecting the first error stays as quiet as it was.
 - The async driver starts its clock on the first poll rather than at `.into_future()`, matching the
   blocking driver. A future parked before its first poll no longer bills that time to the operation.
+
+### Upgrading
+
+Wherever you name the error type:
+
+```diff
+-let value: Result<T, MyError> = retry(op).await;
++let value: Result<T, RetryError<MyError>> = retry(op).await;
+```
+
+`?` into `Box<dyn Error>` or `anyhow::Error` keeps working, and now covers error types it didn't
+before: `String`, `Box<dyn Error>` and `anyhow::Error` all satisfy the new bound. To go back to the
+bare error and keep an existing signature, add `.map_err(RetryError::into_error)`.
+
+Matching on the error goes through an accessor, so `match e` becomes `match e.error()`.
+
+`RetryError` deliberately has no `source()`. Why, and why its `Error` impl is bounded on
+`E: Debug + Display` rather than `E: Error`:
+[ADR006](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR006.md).
 
 ## [0.3.0] - 2026-08-09
 

@@ -831,14 +831,14 @@ mod tests {
         // `.clock(c)` takes the clock by value, so without the reference impls a test could hand
         // over its mock and never read it back. The blocking twin of this is in blocking/retry.rs.
         let clock = MockClock::new();
-        let _: Result<i32, &str> = retry(|| async { Err("x") })
+        let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
             .backoff(backoff(2))
             .clock(&clock)
             .await;
         assert_eq!(clock.slept(), vec![secs(1), secs(2)]);
 
         let shared = Arc::new(MockClock::new());
-        let _: Result<i32, &str> = retry(|| async { Err("x") })
+        let _: Result<i32, RetryError<&str>> = retry(|| async { Err("x") })
             .backoff(backoff(2))
             .clock(Arc::clone(&shared))
             .await;

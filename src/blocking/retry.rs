@@ -332,7 +332,8 @@ mod tests {
         // `.clock(c)` takes the clock by value, so without the reference impls a test could hand
         // over its mock and never read it back. Both forms must reach the same mock.
         let clock = MockClock::new();
-        let _: Result<i32, RetryError<&str>> = retry(|| Err("x")).backoff(backoff(2)).clock(&clock).call();
+        let _: Result<i32, RetryError<&str>> =
+            retry(|| Err("x")).backoff(backoff(2)).clock(&clock).call();
         assert_eq!(clock.slept(), vec![secs(1), secs(2)]);
 
         let shared = std::sync::Arc::new(MockClock::new());
@@ -341,9 +342,10 @@ mod tests {
             .clock(Arc::clone(&shared))
             .call();
         assert_eq!(shared.slept(), vec![secs(1), secs(2)]);
+    }
 
     #[test]
-        fn clock_reads_do_not_scale_with_attempts() {
+    fn clock_reads_do_not_scale_with_attempts() {
         // The async twin of this lives in src/retry.rs. `elapsed()` is public now, so both
         // drivers have to agree on what it costs.
         for retries in [3, 30] {
