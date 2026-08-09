@@ -31,11 +31,13 @@ Adds jitter. Purely additive apart from one collision noted under Upgrading.
 yourself, it now collides with the impl this release adds and the build fails with
 `E0119: conflicting implementations`. Delete yours; this release makes it redundant.
 `cargo-semver-checks` does not flag added impls, so it would not have warned you.
+[ADR005](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR005.md) explains why the
+impls are there and why we shipped them anyway.
 
 `Jittered` and `DecorrelatedBackoff` are deliberately not `Clone`, because a copy carries the RNG
 state and replays the same delays. Keep the config and build a fresh strategy from it.
 
-Why any of this is shaped the way it is, including why there is no jitter *mode* to choose:
+Why the jitter side is shaped the way it is, including why there is no *mode* to choose:
 [ADR004](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR004.md).
 
 ## [0.2.0] - 2026-07-26
