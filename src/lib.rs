@@ -23,8 +23,10 @@
 //! # async fn fetch() -> Result<u32, std::io::Error> { Ok(1) }
 //! ```
 //!
-//! Override the backoff, clock, retry predicate (`.when`), or time budget (`.max_elapsed`) with
-//! the builder methods, then `.await`. No async runtime? The blocking twin is identical but ends
+//! Override the backoff, clock, retry predicate (`.when`), per-attempt bound
+//! (`.attempt_timeout`), or total time budget (`.max_elapsed`) with the builder methods, then
+//! `.await`. Reach for `.attempt_timeout` whenever the operation can hang: `.max_elapsed` is only
+//! consulted between attempts, so on its own it cannot stop a call that never returns. No async runtime? The blocking twin is identical but ends
 //! in `.call()` instead of `.await`.
 //!
 //! # Jitter

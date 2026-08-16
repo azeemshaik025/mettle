@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Retry::attempt_timeout(duration, on_timeout)`. Bounds a single attempt, so an operation that
+  hangs is finally stopped. When it fires the in-flight future is dropped and the attempt is
+  treated as a failure, feeding the normal backoff and the normal `.when(..)` predicate.
+  `on_timeout` supplies the error to report, because the operation never returned one.
+
+  The wait runs on the injected `Clock`, not on Tokio directly, so a timeout is testable on a mock
+  clock with no real time. `tokio::time::timeout` cannot be.
+
+### Fixed
+- `max_elapsed` documented honestly. It is checked *between* attempts, so on its own it never
+  bounded an operation that hangs, while the README said "give up after ~30s total". A future that
+  is never ready gave the budget nothing to act on. Pairing it with `attempt_timeout` is what makes
+  the budget enforceable; the blocking twin says plainly that it has no equivalent and points at
+  the call's own timeout setting instead.
+
+### Changed
+- **Breaking:** `Retry` and `RetryFuture` take one more type parameter, for the on-timeout handler.
+  Only affects code that names those types; `retry(..)` and every builder method are unchanged.
+
 ## [0.4.0] - 2026-08-09
 
 Retry now reports why it gave up, not just what failed last. Breaking.

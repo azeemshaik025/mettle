@@ -31,7 +31,8 @@ use std::time::Duration;
 // then override only what you need.
 let body = retry(|| async { fetch(&url).await })
     .when(|e: &FetchError| e.is_transient())   // skip permanent errors
-    .max_elapsed(Duration::from_secs(30))       // give up after ~30s total
+    .attempt_timeout(Duration::from_secs(5), || FetchError::Timeout)  // bound each try
+    .max_elapsed(Duration::from_secs(30))       // and the total, checked between tries
     .await?;
 ```
 
