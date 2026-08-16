@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The wait runs on the injected `Clock`, not on Tokio directly, so a timeout is testable on a mock
   clock with no real time. `tokio::time::timeout` cannot be.
+  [ADR007](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR007.md) covers why the
+  error comes from a closure rather than making `RetryError::error()` an `Option`, and why there is
+  no blocking equivalent.
 
 ### Fixed
 - `max_elapsed` documented honestly. It is checked *between* attempts, so on its own it never
