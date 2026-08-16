@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-16
+
+Retry can finally stop an attempt that hangs. Breaking.
+
+### Added
+- `Retry::attempt_timeout(duration, on_timeout)`. Bounds a single attempt, so an operation that
+  hangs is finally stopped. When it fires the in-flight future is dropped and the attempt is
+  treated as a failure, feeding the normal backoff and the normal `.when(..)` predicate.
+  `on_timeout` supplies the error to report, because the operation never returned one.
+
+  The wait runs on the injected `Clock`, not on Tokio directly, so a timeout is testable on a mock
+  clock with no real time. `tokio::time::timeout` cannot be.
+  [ADR007](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR007.md) covers why the
+  error comes from a closure rather than making `RetryError::error()` an `Option`, and why there is
+  no blocking equivalent.
+
+### Fixed
+- `max_elapsed` documented honestly. It is checked *between* attempts, so on its own it never
+  bounded an operation that hangs, while the README said "give up after ~30s total". A future that
+  is never ready gave the budget nothing to act on. Pairing it with `attempt_timeout` is what makes
+  the budget enforceable; the blocking twin says plainly that it has no equivalent and points at
+  the call's own timeout setting instead.
+
+### Changed
+- **Breaking:** `Retry` and `RetryFuture` take one more type parameter, for the on-timeout handler.
+  Only affects code that names those types; `retry(..)` and every builder method are unchanged.
+- The crate description and docs now say what mettle is — retry, answered end to end — rather than
+  "a resilience toolkit", and no longer claim that timeout and circuit breaking are planned. Timeout
+  shipped here; the circuit breaker was built and deliberately not shipped. Scope, including what
+  has been refused and why, is in
+  [docs/ROADMAP.md](https://github.com/azeemshaik025/mettle/blob/main/docs/ROADMAP.md).
+
+### Upgrading
+
+Nothing to do unless you *name* `Retry` or `RetryFuture`, which mostly means storing one in a
+struct field or writing a function that returns one. `retry(..)` and every builder method are
+unchanged, so the common inline use compiles as-is.
+
+```diff
+-fn build() -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool> {
++fn build() -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool, fn() -> E> {
+```
+
+The new parameter is the on-timeout handler. When no timeout is configured it is the function
+pointer `fn() -> E` that `retry(..)` seeds, and it is never called. A default (`Q = NoTimeout`) was
+tried and does not work: `NoTimeout` cannot implement `Fn() -> E`, so the no-timeout case would
+need a second `IntoFuture` impl and the two would be seen as potentially overlapping.
+[ADR007](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR007.md) has the detail.
+
 ## [0.4.0] - 2026-08-09
 
 Retry now reports why it gave up, not just what failed last. Breaking.

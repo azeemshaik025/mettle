@@ -72,6 +72,12 @@ impl<F, B, C, P> Retry<F, B, C, P> {
     }
 
     /// Give up once this much total time has elapsed (default: no limit).
+    ///
+    /// Checked *between* attempts, when one returns. It cannot interrupt an attempt that is still
+    /// running, and there is no blocking equivalent of the async `attempt_timeout`: interrupting a
+    /// blocking closure would mean running it on another thread, which would force
+    /// `Send + 'static` onto your operation, and two tests here exist to forbid exactly that. Bound the call itself instead, with whatever it offers, such as
+    /// `TcpStream::set_read_timeout` or your client's own timeout setting.
     pub fn max_elapsed(mut self, budget: Duration) -> Self {
         self.max_elapsed = Some(budget);
         self

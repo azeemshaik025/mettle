@@ -4,6 +4,11 @@
 //! plain `Result` (no `async`) and you finish with `.call()` instead of `.await`, so no runtime
 //! is needed.
 //!
+//! One method is missing here on purpose: there is no `.attempt_timeout`. Interrupting a blocking
+//! call means running it on another thread, which would force `Send + 'static` onto your
+//! operation. Bound the call itself instead — `TcpStream::set_read_timeout`, or whatever your
+//! client offers.
+//!
 //! Run with: `cargo run --example blocking_retry`
 
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};

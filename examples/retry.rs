@@ -9,6 +9,7 @@
 //! - `.when(pred)` retries only the errors `pred` accepts (default: every error)
 //! - `.backoff(cfg)` swaps or tunes the backoff strategy
 //! - `.max_elapsed(d)` gives up once the next wait would push total time past `d`
+//! - `.attempt_timeout(d, on_timeout)` bounds a single attempt, so a hang can't stall the loop
 //! - `.clock(clock)` supplies the time source (default: Tokio)
 //!
 //! The default schedule is deterministic, which means a fleet of clients that failed together
@@ -68,6 +69,21 @@ async fn main() -> Result<(), mettle::BackoffConfigError> {
         .await;
     println!("5. decorrel.: {result:?}"); // every delay at least 20ms
 
+    // 6) A call that hangs. Without `.attempt_timeout` this never returns: `.max_elapsed` is only
+    //    checked between attempts, and an attempt that never finishes never gets there. Bounding
+    //    the attempt turns the hang into an ordinary failure, which lets the budget apply.
+    let result = retry(hangs_forever)
+        .attempt_timeout(Duration::from_millis(100), || FetchError::Timeout)
+        .max_elapsed(Duration::from_millis(300))
+        .await;
+    let err = result.unwrap_err();
+    println!(
+        "6. hung call: gave up after {} attempts in {:?}, reason={}",
+        err.attempts(),
+        err.elapsed(),
+        err.stop_reason().as_str()
+    );
+
     Ok(())
 }
 
@@ -86,6 +102,12 @@ async fn flaky_fetch() -> Result<&'static str, FetchError> {
 /// A call that always fails with a permanent error.
 async fn always_404() -> Result<&'static str, FetchError> {
     Err(FetchError::NotFound)
+}
+
+/// A call that never returns: a dead peer, a lost response, a service that accepted the connection
+/// and then went quiet.
+async fn hangs_forever() -> Result<&'static str, FetchError> {
+    std::future::pending().await
 }
 
 /// A snappier exponential backoff: 20 ms first delay, defaults for the rest.

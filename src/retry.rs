@@ -31,12 +31,13 @@ use crate::shared::{Decision, give_up, should_retry_after, trace_retry};
 /// ([`backoff`](Retry::backoff), [`clock`](Retry::clock), [`when`](Retry::when),
 /// [`max_elapsed`](Retry::max_elapsed)), then `.await` it (it implements [`IntoFuture`]).
 #[must_use = "a `Retry` does nothing until you `.await` it"]
-pub struct Retry<F, B, C, P> {
+pub struct Retry<F, B, C, P, Q> {
     op: F,
     backoff: B,
     clock: C,
     when: P,
     max_elapsed: Option<Duration>,
+    attempt_timeout: Option<(Duration, Q)>,
 }
 
 /// Start retrying `op`, with sensible defaults for everything else: exponential backoff,
@@ -66,7 +67,12 @@ pub struct Retry<F, B, C, P> {
 ///     .map_err(RetryError::into_error)
 /// # }
 /// ```
-pub fn retry<F, Fut, T, E>(op: F) -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool>
+// Five parameters, and a caller never writes this type: `retry(op)` is always used inline or
+// through `.await`. A public alias would be another name to learn for no gain.
+#[allow(clippy::type_complexity)]
+pub fn retry<F, Fut, T, E>(
+    op: F,
+) -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool, fn() -> E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -77,48 +83,97 @@ where
         clock: TokioClock,
         when: (|_| true) as fn(&E) -> bool,
         max_elapsed: None,
+        attempt_timeout: None,
     }
 }
 
-impl<F, B, C, P> Retry<F, B, C, P> {
+impl<F, B, C, P, Q> Retry<F, B, C, P, Q> {
     /// Override the backoff strategy (any [`Backoff`]).
-    pub fn backoff<B2>(self, backoff: B2) -> Retry<F, B2, C, P> {
+    pub fn backoff<B2>(self, backoff: B2) -> Retry<F, B2, C, P, Q> {
         Retry {
             backoff,
             op: self.op,
             when: self.when,
             clock: self.clock,
             max_elapsed: self.max_elapsed,
+            attempt_timeout: self.attempt_timeout,
         }
     }
 
     /// Override the clock (any [`Clock`]), e.g. a mock clock in tests.
-    pub fn clock<C2>(self, clock: C2) -> Retry<F, B, C2, P> {
+    pub fn clock<C2>(self, clock: C2) -> Retry<F, B, C2, P, Q> {
         Retry {
             clock,
             op: self.op,
             backoff: self.backoff,
             when: self.when,
             max_elapsed: self.max_elapsed,
+            attempt_timeout: self.attempt_timeout,
         }
     }
 
     /// Give up once this much total time has elapsed (default: no limit).
+    ///
+    /// Checked *between* attempts, when one returns. It cannot interrupt an attempt that is still
+    /// running, so on its own it does not bound an operation that hangs. Pair it with
+    /// [`attempt_timeout`](Retry::attempt_timeout), which bounds each attempt and thereby gives
+    /// this budget something to act on.
     pub fn max_elapsed(mut self, budget: Duration) -> Self {
         self.max_elapsed = Some(budget);
         self
     }
 }
 
-impl<F, Fut, T, E, B, C, P> Retry<F, B, C, P>
+impl<F, Fut, T, E, B, C, P, Q> Retry<F, B, C, P, Q>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
+    /// Bound how long a single attempt may take.
+    ///
+    /// `max_elapsed` is only consulted *between* attempts, so on its own it cannot stop an
+    /// operation that hangs: a dead TCP peer produces a future that is simply never ready, and the
+    /// budget never gets a chance to apply. This does stop it. When `timeout` passes, the in-flight
+    /// future is dropped (real cancellation in Rust) and the attempt is treated as a failure, so it
+    /// feeds the normal backoff sequence and the normal `.when(..)` predicate.
+    ///
+    /// `on_timeout` supplies the error to report for a timed-out attempt, because the operation
+    /// never returned one. Mapping it into your own error type keeps everything downstream, from
+    /// `.when(..)` to the final [`RetryError`], working on one type.
+    ///
+    /// The wait runs on the injected [`Clock`], not on Tokio directly, so a mock clock makes this
+    /// testable without real time.
+    ///
+    /// ```no_run
+    /// # use mettle::retry;
+    /// # use std::time::Duration;
+    /// # #[derive(Debug)] enum MyError { Timeout, Other }
+    /// # async fn fetch() -> Result<u32, MyError> { Ok(1) }
+    /// # async fn demo() {
+    /// let out = retry(fetch)
+    ///     .attempt_timeout(Duration::from_secs(5), || MyError::Timeout)
+    ///     .await;
+    /// # let _ = out;
+    /// # }
+    /// ```
+    pub fn attempt_timeout<Q2>(self, timeout: Duration, on_timeout: Q2) -> Retry<F, B, C, P, Q2>
+    where
+        Q2: Fn() -> E,
+    {
+        Retry {
+            attempt_timeout: Some((timeout, on_timeout)),
+            op: self.op,
+            backoff: self.backoff,
+            clock: self.clock,
+            when: self.when,
+            max_elapsed: self.max_elapsed,
+        }
+    }
+
     /// Only retry errors for which `predicate` returns `true` (default: retry all).
     ///
     /// The predicate sees each `&E`, so `e`'s type is inferred; no annotation needed.
-    pub fn when<P2>(self, predicate: P2) -> Retry<F, B, C, P2>
+    pub fn when<P2>(self, predicate: P2) -> Retry<F, B, C, P2, Q>
     where
         P2: Fn(&E) -> bool,
     {
@@ -128,21 +183,23 @@ where
             backoff: self.backoff,
             clock: self.clock,
             max_elapsed: self.max_elapsed,
+            attempt_timeout: self.attempt_timeout,
         }
     }
 }
 
-impl<F, Fut, T, E, B, C, P> IntoFuture for Retry<F, B, C, P>
+impl<F, Fut, T, E, B, C, P, Q> IntoFuture for Retry<F, B, C, P, Q>
 where
     C: Clock,
     P: Fn(&E) -> bool,
+    Q: Fn() -> E,
     E: std::fmt::Debug,
     F: FnMut() -> Fut,
     B: Backoff,
     Fut: Future<Output = Result<T, E>>,
 {
     type Output = Result<T, RetryError<E>>;
-    type IntoFuture = RetryFuture<F, Fut, B, C, P, C::Sleep>;
+    type IntoFuture = RetryFuture<F, Fut, B, C, P, C::Sleep, Q>;
 
     fn into_future(self) -> Self::IntoFuture {
         RetryFuture {
@@ -158,6 +215,7 @@ where
             clock: self.clock,
             backoff: self.backoff,
             max_elapsed: self.max_elapsed,
+            attempt_timeout: self.attempt_timeout,
         }
     }
 }
@@ -167,7 +225,7 @@ pin_project! {
     ///
     /// It borrows only what the operation borrows, and is `Send` only when its parts are, so
     /// the operation may borrow local state and need not be `Send`.
-    pub struct RetryFuture<F, Fut, B, C, P, S> {
+    pub struct RetryFuture<F, Fut, B, C, P, S, Q> {
         op: F,
         when: P,
         clock: C,
@@ -179,6 +237,7 @@ pin_project! {
         state: RetryState<Fut, S>,
 
         max_elapsed: Option<Duration>,
+        attempt_timeout: Option<(Duration, Q)>,
     }
 }
 
@@ -189,14 +248,17 @@ pin_project! {
     enum RetryState<Fut, S> {
         Idle,
         Sleeping { #[pin] delay: S },
-        Attempting { #[pin] fut: Fut },
+        // The timeout future is `None` unless `attempt_timeout` was set, so the common path
+        // allocates and polls nothing extra.
+        Attempting { #[pin] fut: Fut, #[pin] deadline: Option<S> },
     }
 }
 
-impl<F, Fut, T, E, B, C, P, S> Future for RetryFuture<F, Fut, B, C, P, S>
+impl<F, Fut, T, E, B, C, P, S, Q> Future for RetryFuture<F, Fut, B, C, P, S, Q>
 where
     B: Backoff,
     P: Fn(&E) -> bool,
+    Q: Fn() -> E,
     E: std::fmt::Debug,
     F: FnMut() -> Fut,
     C: Clock<Sleep = S>,
@@ -214,14 +276,39 @@ where
                 // the clock starts.
                 RetryStateProj::Idle => {
                     *this.start = Some(this.clock.now());
-                    RetryState::Attempting { fut: (this.op)() }
+                    let deadline = this
+                        .attempt_timeout
+                        .as_ref()
+                        .map(|(d, _)| this.clock.sleep(*d));
+                    RetryState::Attempting {
+                        fut: (this.op)(),
+                        deadline,
+                    }
                 }
 
                 // An attempt is in flight — drive it.
-                RetryStateProj::Attempting { fut } => match fut.poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(value)) => return Poll::Ready(Ok(value)),
-                    Poll::Ready(Err(err)) => {
+                RetryStateProj::Attempting { fut, deadline } => {
+                    // The operation gets first look; a result that is already available wins even
+                    // if the deadline is also up, so a race never discards a finished call.
+                    let err = match fut.poll(cx) {
+                        Poll::Ready(Ok(value)) => return Poll::Ready(Ok(value)),
+                        Poll::Ready(Err(err)) => err,
+                        // Pair the deadline with its handler, so the arm that needs both is the
+                        // only one that can run. Nothing to unwrap, and no unreachable panic.
+                        Poll::Pending => {
+                            match (deadline.as_pin_mut(), this.attempt_timeout.as_ref()) {
+                                (Some(d), Some((_, on_timeout))) => match d.poll(cx) {
+                                    Poll::Pending => return Poll::Pending,
+                                    // Out of time. Synthesising the error here is what lets a
+                                    // timed-out attempt travel the same path as a returned one.
+                                    Poll::Ready(()) => on_timeout(),
+                                },
+                                // No timeout configured, so the attempt runs unbounded.
+                                _ => return Poll::Pending,
+                            }
+                        }
+                    };
+                    {
                         let elapsed = || {
                             this.start.map_or(Duration::ZERO, |s| {
                                 this.clock.now().saturating_duration_since(s)
@@ -253,12 +340,21 @@ where
                             }
                         }
                     }
-                },
+                }
 
                 // Backing off — wait, then start the next attempt.
                 RetryStateProj::Sleeping { delay } => match delay.poll(cx) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(()) => RetryState::Attempting { fut: (this.op)() },
+                    Poll::Ready(()) => {
+                        let deadline = this
+                            .attempt_timeout
+                            .as_ref()
+                            .map(|(d, _)| this.clock.sleep(*d));
+                        RetryState::Attempting {
+                            fut: (this.op)(),
+                            deadline,
+                        }
+                    }
                 },
             };
             this.state.set(next);
@@ -300,16 +396,43 @@ mod tests {
         }
     }
     impl Clock for MockClock {
-        type Sleep = std::future::Ready<()>;
+        type Sleep = MockSleep;
 
         fn now(&self) -> Instant {
             self.now_calls.fetch_add(1, SeqCst);
             self.start + *self.elapsed.lock().unwrap()
         }
-        fn sleep(&self, dur: Duration) -> std::future::Ready<()> {
-            self.log.lock().unwrap().push(dur);
-            *self.elapsed.lock().unwrap() += dur;
-            std::future::ready(())
+        fn sleep(&self, dur: Duration) -> MockSleep {
+            MockSleep {
+                dur,
+                clock: self.clone(),
+                fired: false,
+            }
+        }
+    }
+
+    /// A sleep that only advances the virtual clock when it is actually polled.
+    ///
+    /// Creating a `tokio::time::Sleep` and dropping it unpolled costs nothing, so the mock has to
+    /// behave the same way. It used to record on creation, which was fine while retry only ever
+    /// built a sleep it intended to await. `attempt_timeout` arms a deadline that a fast operation
+    /// never polls, and that made the difference visible.
+    struct MockSleep {
+        dur: Duration,
+        clock: MockClock,
+        fired: bool,
+    }
+
+    impl Future for MockSleep {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            if !self.fired {
+                self.fired = true;
+                let dur = self.dur;
+                self.clock.log.lock().unwrap().push(dur);
+                *self.clock.elapsed.lock().unwrap() += dur;
+            }
+            Poll::Ready(())
         }
     }
 
@@ -824,6 +947,71 @@ mod tests {
             slept.iter().all(|d| *d >= secs(1) && *d <= secs(20)),
             "delays escaped [base, max_delay]: {slept:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn attempt_timeout_bounds_an_operation_that_hangs() {
+        // The bug this exists for: `max_elapsed` is only consulted between attempts, so on its own
+        // it never stops a future that is simply never ready. A dead TCP peer looks exactly like
+        // this. Runs on the mock clock, so it is instant and exact.
+        let clock = MockClock::new();
+        let out: Result<i32, RetryError<&str>> = retry(std::future::pending::<Result<i32, &str>>)
+            .backoff(backoff(2))
+            .attempt_timeout(secs(5), || "timed out")
+            .clock(clock.clone())
+            .await;
+
+        let err = out.unwrap_err();
+        assert_eq!(*err.error(), "timed out");
+        assert_eq!(err.attempts(), 3); // the initial attempt plus 2 retries, each timed out
+        assert_eq!(err.stop_reason(), StopReason::RetriesExhausted);
+        // 3 attempts x 5s of waiting, plus the 1s and 2s backoff sleeps between them.
+        assert_eq!(
+            clock.slept(),
+            vec![secs(5), secs(1), secs(5), secs(2), secs(5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fast_operation_never_sees_the_timeout() {
+        // The deadline must not fire for work that finishes, and must not cost a sleep.
+        let clock = MockClock::new();
+        let out: Result<i32, RetryError<&str>> = retry(|| async { Ok(7) })
+            .attempt_timeout(secs(5), || "timed out")
+            .clock(clock.clone())
+            .await;
+        assert_eq!(out.unwrap(), 7);
+        assert!(clock.slept().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_returned_error_wins_over_an_expired_deadline() {
+        // If the operation is ready in the same poll the deadline is up, the real result wins.
+        // Otherwise a race would throw away a call that actually completed.
+        let clock = MockClock::new();
+        let out: Result<i32, RetryError<&str>> = retry(|| async { Err("real error") })
+            .backoff(backoff(1))
+            .attempt_timeout(Duration::ZERO, || "timed out")
+            .clock(clock.clone())
+            .await;
+        assert_eq!(*out.unwrap_err().error(), "real error");
+    }
+
+    #[tokio::test]
+    async fn attempt_timeout_feeds_the_when_predicate() {
+        // A timed-out attempt travels the same path as a returned error, so `.when` can refuse it.
+        let clock = MockClock::new();
+        let out: Result<i32, RetryError<&str>> = retry(std::future::pending::<Result<i32, &str>>)
+            .backoff(backoff(5))
+            .attempt_timeout(secs(5), || "timed out")
+            .when(|e: &&str| *e != "timed out")
+            .clock(clock.clone())
+            .await;
+
+        let err = out.unwrap_err();
+        assert_eq!(err.stop_reason(), StopReason::NotRetryable);
+        assert_eq!(err.attempts(), 1);
+        assert_eq!(clock.slept(), vec![secs(5)]); // one timeout, then it gave up
     }
 
     #[tokio::test]
