@@ -1,6 +1,6 @@
 [package]
 name = "mettle"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Retry for Rust, async and blocking: backoff, jitter, per-attempt timeouts, and a clock you can mock."

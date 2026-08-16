@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-16
+
+Retry can finally stop an attempt that hangs. Breaking.
+
 ### Added
 - `Retry::attempt_timeout(duration, on_timeout)`. Bounds a single attempt, so an operation that
   hangs is finally stopped. When it fires the in-flight future is dropped and the attempt is
@@ -34,6 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped here; the circuit breaker was built and deliberately not shipped. Scope, including what
   has been refused and why, is in
   [docs/ROADMAP.md](https://github.com/azeemshaik025/mettle/blob/main/docs/ROADMAP.md).
+
+### Upgrading
+
+Nothing to do unless you *name* `Retry` or `RetryFuture`, which mostly means storing one in a
+struct field or writing a function that returns one. `retry(..)` and every builder method are
+unchanged, so the common inline use compiles as-is.
+
+```diff
+-fn build() -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool> {
++fn build() -> Retry<F, ExponentialBackoff, TokioClock, fn(&E) -> bool, fn() -> E> {
+```
+
+The new parameter is the on-timeout handler. When no timeout is configured it is the function
+pointer `fn() -> E` that `retry(..)` seeds, and it is never called. A default (`Q = NoTimeout`) was
+tried and does not work: `NoTimeout` cannot implement `Fn() -> E`, so the no-timeout case would
+need a second `IntoFuture` impl and the two would be seen as potentially overlapping.
+[ADR007](https://github.com/azeemshaik025/mettle/blob/main/docs/adr/ADR007.md) has the detail.
 
 ## [0.4.0] - 2026-08-09
 

@@ -30,7 +30,7 @@ The second, smaller claim is shape. Operations are `FnMut() -> Fut` factories, s
 | exponential backoff, validated config, saturating arithmetic | 0.1 |
 | jitter (full) and `DecorrelatedBackoff` | 0.3.0 |
 | `RetryError<E>` with attempts, elapsed, and why it stopped | 0.4.0 |
-| `attempt_timeout`, so a hung attempt is finally bounded | next |
+| `attempt_timeout`, so a hung attempt is finally bounded | 0.5.0 |
 
 ## Planned
 
