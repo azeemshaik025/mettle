@@ -1,10 +1,13 @@
 //! # mettle
 //!
-//! A resilience toolkit for Rust: composable, testable primitives for handling failure, so you
-//! don't hand-roll retry-and-backoff logic in every project.
+//! Retry for Rust, answered end to end: how long to wait, when to stop waiting on one attempt,
+//! when to give up, and what to report when it's over. Every policy decision is a pure function of
+//! an injected clock, so a thirty second budget is testable in microseconds with no real time
+//! passing.
 //!
-//! Available now: `retry()` (async) and `blocking::retry()` (sync), both with configurable
-//! backoff and optional jitter. Timeout and circuit breaking are planned.
+//! `retry()` (async) and `blocking::retry()` (sync) share one decision core, so the two decide
+//! alike. Operations are `FnMut() -> Fut` factories rather than values, so nothing you retry has to
+//! be `Clone`, `Send`, or `'static`.
 //!
 //! # Quickstart
 //!
@@ -25,9 +28,12 @@
 //!
 //! Override the backoff, clock, retry predicate (`.when`), per-attempt bound
 //! (`.attempt_timeout`), or total time budget (`.max_elapsed`) with the builder methods, then
-//! `.await`. Reach for `.attempt_timeout` whenever the operation can hang: `.max_elapsed` is only
-//! consulted between attempts, so on its own it cannot stop a call that never returns. No async runtime? The blocking twin is identical but ends
-//! in `.call()` instead of `.await`.
+//! `.await`. No async runtime? The blocking twin is identical but ends in `.call()` instead of
+//! `.await`.
+//!
+//! Reach for `.attempt_timeout` whenever the operation can hang. `.max_elapsed` is only consulted
+//! between attempts, so on its own it cannot stop a call that never returns; the two together are
+//! what make a total budget enforceable.
 //!
 //! # Jitter
 //!

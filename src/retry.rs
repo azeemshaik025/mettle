@@ -290,28 +290,24 @@ where
                 RetryStateProj::Attempting { fut, deadline } => {
                     // The operation gets first look; a result that is already available wins even
                     // if the deadline is also up, so a race never discards a finished call.
-                    let outcome = match fut.poll(cx) {
+                    let err = match fut.poll(cx) {
                         Poll::Ready(Ok(value)) => return Poll::Ready(Ok(value)),
-                        Poll::Ready(Err(err)) => Some(err),
-                        Poll::Pending => match deadline.as_pin_mut() {
-                            // No deadline configured, or it has not fired yet.
-                            None => return Poll::Pending,
-                            Some(d) => match d.poll(cx) {
-                                Poll::Pending => return Poll::Pending,
-                                // Out of time. Synthesising the error here is what lets a
-                                // timed-out attempt travel the same path as a returned one.
-                                Poll::Ready(()) => {
-                                    let (_, on_timeout) = this
-                                        .attempt_timeout
-                                        .as_ref()
-                                        .expect("a deadline exists only when one was configured");
-                                    Some(on_timeout())
-                                }
-                            },
-                        },
+                        Poll::Ready(Err(err)) => err,
+                        // Pair the deadline with its handler, so the arm that needs both is the
+                        // only one that can run. Nothing to unwrap, and no unreachable panic.
+                        Poll::Pending => {
+                            match (deadline.as_pin_mut(), this.attempt_timeout.as_ref()) {
+                                (Some(d), Some((_, on_timeout))) => match d.poll(cx) {
+                                    Poll::Pending => return Poll::Pending,
+                                    // Out of time. Synthesising the error here is what lets a
+                                    // timed-out attempt travel the same path as a returned one.
+                                    Poll::Ready(()) => on_timeout(),
+                                },
+                                // No timeout configured, so the attempt runs unbounded.
+                                _ => return Poll::Pending,
+                            }
+                        }
                     };
-                    let err =
-                        outcome.expect("every branch above either returns or yields an error");
                     {
                         let elapsed = || {
                             this.start.map_or(Duration::ZERO, |s| {

@@ -5,9 +5,11 @@
 [![CI](https://github.com/azeemshaik025/mettle/actions/workflows/ci.yml/badge.svg)](https://github.com/azeemshaik025/mettle/actions/workflows/ci.yml)
 [![license](https://img.shields.io/crates/l/mettle.svg)](#license)
 
-**A resilience toolkit for Rust.**
+**Retry for Rust, answered end to end.**
 
-Composable, testable primitives for handling failure. [Documentation](https://docs.rs/mettle).
+How long to wait, when to stop waiting on one attempt, when to give up, and what to report when
+it's over. Every policy decision is a pure function of an injected clock, so a 30-second budget is
+testable in microseconds with no real time passing. [Documentation](https://docs.rs/mettle).
 
 ## Install
 
@@ -25,16 +27,26 @@ cargo add mettle --no-default-features --features blocking
 
 ```rust
 use mettle::retry;
-use std::time::Duration;
 
-// Retry with sensible defaults (exponential backoff, up to 3 retries),
-// then override only what you need.
+// Sensible defaults: exponential backoff, up to 3 retries.
+let body = retry(|| async { fetch(&url).await }).await?;
+```
+
+Then override only what you need:
+
+```rust
 let body = retry(|| async { fetch(&url).await })
-    .when(|e: &FetchError| e.is_transient())   // skip permanent errors
-    .attempt_timeout(Duration::from_secs(5), || FetchError::Timeout)  // bound each try
-    .max_elapsed(Duration::from_secs(30))       // and the total, checked between tries
+    .when(|e: &FetchError| e.is_transient())    // skip permanent errors
+    .attempt_timeout(Duration::from_secs(5), || FetchError::Timeout)
+    .max_elapsed(Duration::from_secs(30))
     .await?;
 ```
+
+`attempt_timeout` bounds a single try, dropping the in-flight future and feeding the timeout into
+the normal backoff. Reach for it whenever the call can hang: `max_elapsed` is only consulted
+*between* attempts, so on its own it cannot stop a call that never returns. Its second argument is
+the error to report, since a timed-out attempt never returned one of its own — for `io::Error` that
+is `|| ErrorKind::TimedOut.into()`.
 
 No async runtime? The blocking twin is identical but ends in `.call()` instead of `.await`.
 
@@ -75,14 +87,23 @@ match retry(|| async { fetch(&url).await }).await {
 
 Only want the underlying error? `.map_err(RetryError::into_error)`.
 
-## Tools
+## Examples
 
-Each tool comes with a runnable example. Start there:
-
-- **retry**: async [examples/retry.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/retry.rs) · blocking [examples/blocking_retry.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/blocking_retry.rs)
+Runnable, and the fastest way in:
+[examples/retry.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/retry.rs) (async) ·
+[examples/blocking_retry.rs](https://github.com/azeemshaik025/mettle/blob/main/examples/blocking_retry.rs)
+(blocking).
 
 Retries emit `tracing` events out of the box (target `mettle::retry`). Install any subscriber
 (e.g. `tracing_subscriber::fmt::init()`) to see them.
+
+## Scope
+
+mettle does retry, and does it completely, rather than being a shallow toolkit of five tools. The
+test for anything new is whether it's about a failed call; that's what keeps bulkheads, rate
+limiting and caching out. What's planned and what's been refused, with the reasoning, is in
+[docs/ROADMAP.md](https://github.com/azeemshaik025/mettle/blob/main/docs/ROADMAP.md); design
+decisions are in [docs/adr](https://github.com/azeemshaik025/mettle/tree/main/docs/adr).
 
 ## Status
 

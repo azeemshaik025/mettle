@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Breaking:** `Retry` and `RetryFuture` take one more type parameter, for the on-timeout handler.
   Only affects code that names those types; `retry(..)` and every builder method are unchanged.
+- The crate description and docs now say what mettle is — retry, answered end to end — rather than
+  "a resilience toolkit", and no longer claim that timeout and circuit breaking are planned. Timeout
+  shipped here; the circuit breaker was built and deliberately not shipped. Scope, including what
+  has been refused and why, is in
+  [docs/ROADMAP.md](https://github.com/azeemshaik025/mettle/blob/main/docs/ROADMAP.md).
 
 ## [0.4.0] - 2026-08-09
 
